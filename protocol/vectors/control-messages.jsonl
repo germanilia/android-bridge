@@ -1,0 +1,6 @@
+{"id":"m1","type":"link.hello","payload":{"deviceName":"galaxy","platform":"android"}}
+{"id":"m2","type":"link.heartbeat"}
+{"id":"m3","type":"clip.update","payload":{"text":"hello world"}}
+{"id":"m4","type":"call.action","replyTo":"m1","payload":{"action":"answer"}}
+{"id":"m5","type":"notif.posted","payload":{"pkg":"com.whatsapp","title":"Mom","text":"hi","postedAt":123}}
+{"id":"m6","type":"file.offer","payload":{"transferId":"t1","name":"a.pdf","size":2048,"streamId":9}}

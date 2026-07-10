@@ -1,0 +1,32 @@
+# macOS
+.DS_Store
+
+# Xcode / Swift
+build/
+DerivedData/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+.swiftpm/
+mac/.build/
+mac/dist/
+protocol/swift/.build/
+mac/Tools/mlx_whisper/.venv/
+
+# Android / Gradle
+.gradle/
+android/build/
+android/app/build/
+android/.kotlin/
+android/local.properties
+*.iml
+.idea/
+
+# Secrets / keys
+*.keystore
+*.p12
+secrets.properties
+local.env
+
+# Local AI workflow/rule cache
+.aidlc-rule-details/
+CLAUDE.md
