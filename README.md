@@ -4,8 +4,10 @@ Android Bridge is an open-source, local-first continuity app for **Android ↔ m
 It brings the everyday convenience of Apple Continuity to an Android phone and a Mac without accounts,
 cloud relays, or vendor lock-in.
 
-The two apps discover each other on the local network, pair with certificate pinning, and communicate over
-a pinned TLS session.
+The two apps discover each other on the local network, pair by pinning certificate fingerprints, and communicate over TLS.
+Current production transport uses pinned server-authenticated TLS; full mutual TLS/client-certificate verification is planned hardening.
+
+The Mac app also includes local-only productivity tools that work without a phone: Meetings and Second Brain.
 
 ## Features
 
@@ -37,7 +39,7 @@ a pinned TLS session.
 - **Local-first encrypted transport**
   - No backend service.
   - No account.
-  - Pinned TLS between paired devices.
+  - TLS with pinned certificate validation between paired devices.
 - **Mac login item**
   - The Mac app can start automatically on login.
 
@@ -247,7 +249,8 @@ Android Bridge is designed for a trusted local network and paired devices:
 
 - Devices discover each other with local network service discovery.
 - Pairing records the peer certificate fingerprint.
-- Runtime communication uses TLS and validates the pinned peer identity.
+- Runtime communication uses TLS with pinned certificate validation.
+- Current production transport is pinned server-authenticated TLS; full mutual TLS/client-certificate verification is planned future hardening.
 - There is no cloud relay and no central account.
 - Received files on Mac are kept in a temporary cache and auto-cleaned.
 
@@ -256,8 +259,8 @@ for the current transport decision record.
 
 ## Current status
 
-This is an active early-stage project. Core continuity flows are implemented and being tested on real
-hardware. Expect rough edges around OS permissions, local signing, and vendor-specific Android behavior.
+This is an active early-stage project. Core continuity flows are implemented, with some features still needing broader real-device validation.
+Expect rough edges around OS permissions, local signing, and vendor-specific Android behavior.
 
 Known limitations:
 
