@@ -128,7 +128,6 @@ public final class LinkManager: ObservableObject {
         macRecorder.onUpdate = { [weak self] in self?.refreshMeetings() }
         macRecorder.onFinished = { [weak self] notes in self?.promptFinishedMeeting(notesURL: notes) }
         refreshMeetings()
-        refreshBrain()
     }
 
     private func rememberPaired(_ fp: String) {
@@ -743,14 +742,22 @@ public final class LinkManager: ObservableObject {
         }
     }
 
-    public func refreshBrain() {
-        DispatchQueue.global(qos: .userInitiated).async {
+    public func refreshBrain(loadMap: Bool = false) {
+        let path = selectedBrainPath
+        DispatchQueue.global(qos: .utility).async {
             do {
                 let nodes = try self.brainStore.tree()
-                let edges = self.brainStore.edges()
-                let content = try self.brainStore.show(self.selectedBrainPath)
+                let edges = loadMap ? self.brainStore.edges() : self.brainEdges
+                let content = try self.brainStore.show(path)
                 DispatchQueue.main.async { self.brainNodes = nodes; self.brainEdges = edges; self.selectedBrainContent = content }
             } catch { self.pushEvent("🧠 Second brain refresh failed: \(error.localizedDescription)") }
+        }
+    }
+
+    public func loadBrainMap() {
+        DispatchQueue.global(qos: .utility).async {
+            let edges = self.brainStore.edges()
+            DispatchQueue.main.async { self.brainEdges = edges }
         }
     }
 
@@ -758,7 +765,7 @@ public final class LinkManager: ObservableObject {
 
     public func selectBrainNode(_ path: String) {
         selectedBrainPath = path
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .utility).async {
             do {
                 let content = try self.brainStore.show(path)
                 DispatchQueue.main.async { self.selectedBrainContent = content }

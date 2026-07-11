@@ -65,6 +65,7 @@ Executed autonomously (user away; recommended defaults taken). Approval gates re
 - [ ] Operations (placeholder)
 
 ### 🔁 POST-CONSTRUCTION FEATURE INCREMENTS
+- [ ] Increment 6: One-line macOS installation — requirements and workflow plan approved; code generation plan awaiting approval. Planned scope: GitHub Releases packaging/checksum, public installer script, and README command.
 - [x] Call-control compatibility fix — Mac now sends protocol-aligned `answer`/`decline`; Android accepts both new names and legacy aliases, and dialing is centralized through `dialFromMac(...)`.
 - [ ] Increment 1: Call control hardening — permission/status reporting, call-action result feedback to Mac, active call state updates, target Samsung hardware verification.
 - [x] Increment 2: Bluetooth HFP feasibility spike — **COMPLETE, hardware-validated on S23 Ultra + M1 Mac**. **Verdict: call audio over HFP does NOT work on this hardware.** HFP *control* works (Mac connects as HF, `call active = 1`) but the *SCO audio* link fails to establish (`BTM_CreateSco Fail` / `HFSCO-SCO fail reason 13`) — audio stays on the phone. Root cause: macOS/controller-level SCO limitation as HFP Hands-Free unit; not fixable from the app. Decision: **do NOT build Option C (HfpAudioBridge); ship the manual-audio fallback** — Wi-Fi/TLS keeps full call control (built), call audio stays on the phone or a phone-paired BT headset, with clear UI copy. Probe kept for future OS re-test. Findings: `aidlc-docs/increments/increment-2-hfp-feasibility.md`.

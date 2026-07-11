@@ -1146,7 +1146,7 @@ struct SecondBrainTab: View {
                     Image(systemName: "brain.head.profile").font(.title2).foregroundStyle(.purple)
                     Text("Second Brain").font(.title2).bold()
                     Spacer()
-                    Button { link.refreshBrain() } label: { Image(systemName: "arrow.clockwise") }
+                    Button { link.refreshBrain(loadMap: brainView == "Map") } label: { Image(systemName: "arrow.clockwise") }
                     Button { link.openSecondBrainFolder() } label: { Image(systemName: "folder") }
                 }
                 HStack {
@@ -1262,6 +1262,12 @@ struct SecondBrainTab: View {
             }
             .padding()
             .frame(minWidth: 620)
+        }
+        .onAppear {
+            if link.brainNodes.isEmpty { link.refreshBrain(loadMap: brainView == "Map") }
+        }
+        .onChange(of: brainView) { view in
+            if view == "Map" { link.loadBrainMap() }
         }
     }
 

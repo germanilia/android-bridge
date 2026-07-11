@@ -421,3 +421,51 @@ need to make sure the documentaiton is updated once done."
 **Context**: CONSTRUCTION - meeting capture reliability iteration
 
 ---
+
+## One-Line Installation Feature Request
+**Timestamp**: 2026-07-11T17:22:30Z
+**User Input**: "can we create one liner installation for this app?"
+**AI Response**: "Resumed the existing brownfield AI-DLC project, confirmed current architecture documentation is available, and created a focused requirements question file for installation target, artifact source, and invocation method."
+**Context**: INCEPTION - Requirements Analysis for post-construction installation increment
+
+---
+
+## One-Line Installation Requirements Answers
+**Timestamp**: 2026-07-11T17:25:27Z
+**User Input**: "doen"
+**AI Response**: "Validated answers: macOS only, GitHub Releases artifacts, and public curl-to-bash invocation. Generated one-line-installation-requirements.md and requested review approval."
+**Context**: INCEPTION - Requirements Analysis approval gate
+
+---
+
+## One-Line Installation Requirements Approval and Workflow Planning
+**Timestamp**: 2026-07-11T17:26:53Z
+**User Input**: "continue"
+**AI Response**: "Approved the requirements and created a minimal workflow plan: skip user stories and design stages; execute code generation and build/test for installer, GitHub release packaging, checksum publication, and README documentation."
+**Context**: INCEPTION - Workflow Planning approval gate
+
+---
+
+## One-Line Installation Workflow Approval and Code Plan
+**Timestamp**: 2026-07-11T17:28:23Z
+**User Input**: "continue"
+**AI Response**: "Approved the workflow plan and created the detailed six-step code generation plan. Requested explicit approval before implementation."
+**Context**: CONSTRUCTION - Code Generation Part 1 approval gate
+
+---
+
+## User Performance Report
+**Timestamp**: 2026-07-11T17:33:28Z
+**User Input**: "the app is very laggy when I open it or brows throught the notes"
+**AI Response**: "Started focused performance investigation for Mac Second Brain startup and note browsing lag."
+**Context**: Post-construction increment/debugging
+
+---
+
+## User Undo and Deployment Question
+**Timestamp**: 2026-07-11T17:35:20Z
+**User Input**: "and for some reason the cmd + z doest revet not changes, did you redeploy?"
+**AI Response**: "Confirmed no redeploy was performed and started a focused fix for missing macOS Edit/Undo commands in the menu-bar app."
+**Context**: Post-construction debugging
+
+---
