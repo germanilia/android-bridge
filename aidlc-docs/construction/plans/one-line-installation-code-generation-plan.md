@@ -12,12 +12,12 @@ This file is the single source of truth for this implementation.
 
 ## Execution Steps
 
-- [ ] **Step 1 — Installer:** Create `install.sh` using strict shell mode, HTTPS GitHub release resolution, temporary workspace cleanup, SHA-256 verification, archive extraction, and installation into `/Applications/AndroidBridge.app`.
-- [ ] **Step 2 — Release packaging:** Create `.github/workflows/release-macos.yml` to build on version tags, package `AndroidBridge.app`, generate its SHA-256 checksum, and publish both assets to GitHub Releases.
-- [ ] **Step 3 — Documentation:** Update `README.md` with the canonical one-line macOS installation command, prerequisites, installed path, and scope.
-- [ ] **Step 4 — Static validation:** Validate shell syntax, workflow YAML structure, pinned GitHub Action versions, and absence of unsafe installer behavior.
-- [ ] **Step 5 — Build/package validation:** Build the macOS bundle, reproduce release archive/checksum generation locally, and verify extraction and checksum compatibility without overwriting the installed application.
-- [ ] **Step 6 — Summary:** Create `aidlc-docs/construction/one-line-installation/code/code-generation-summary.md` and update `aidlc-docs/aidlc-state.md`.
+- [x] **Step 1 — Installer:** Create `install.sh` using strict shell mode, HTTPS GitHub release resolution, temporary workspace cleanup, SHA-256 verification, archive extraction, and installation into `/Applications/AndroidBridge.app`.
+- [x] **Step 2 — Release packaging:** Create `.github/workflows/release-macos.yml` to build on version tags, package `AndroidBridge.app`, generate its SHA-256 checksum, and publish both assets to GitHub Releases.
+- [x] **Step 3 — Documentation:** Update `README.md` with the canonical one-line macOS installation command, prerequisites, installed path, and scope.
+- [x] **Step 4 — Static validation:** Validate shell syntax, workflow YAML structure, pinned GitHub Action versions, and absence of unsafe installer behavior.
+- [x] **Step 5 — Build/package validation:** Build the macOS bundle, reproduce release archive/checksum generation locally, and verify extraction and checksum compatibility without overwriting the installed application.
+- [x] **Step 6 — Summary:** Create `aidlc-docs/construction/one-line-installation/code/code-generation-summary.md` and update `aidlc-docs/aidlc-state.md`.
 
 ## Security Constraints
 

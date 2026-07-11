@@ -101,6 +101,26 @@ aidlc-docs/    Design notes and implementation records
 > Installing the Mac app to `/Applications` (the default `make-macos-app.sh` behavior) and
 > `adb install` onto a device also require user confirmation.
 
+### One-line macOS installation
+
+Install the latest successful Apple Silicon build from `main`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/germanilia/android-bridge/main/install.sh | bash
+```
+
+The installer downloads the rolling `latest-build` release over HTTPS, verifies its SHA-256
+checksum, installs `AndroidBridge.app` into `/Applications`, and launches it. It replaces an existing
+installation and may request administrator privileges when `/Applications` is not writable. It does
+not install optional Ollama, pi, ffmpeg, Python, or MLX Whisper dependencies.
+
+Download the latest debug-signed Android APK from the same rolling release:
+
+[Download AndroidBridge-latest.apk](https://github.com/germanilia/android-bridge/releases/download/latest-build/AndroidBridge-latest.apk)
+
+Android may ask you to allow installation from your browser or file manager. Every successful push
+to `main` replaces the macOS archive, APK, and SHA-256 checksums in this rolling release.
+
 ### Prerequisites
 
 - macOS 13+
