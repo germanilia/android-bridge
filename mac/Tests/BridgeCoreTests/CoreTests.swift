@@ -162,6 +162,42 @@ final class SummaryRepairTests: XCTestCase {
     }
 }
 
+final class SetupCatalogTests: XCTestCase {
+    func testCatalogContainsEverySupportedDependencyOnce() {
+        let support = URL(fileURLWithPath: "/tmp/android-bridge-setup")
+        let requirements = URL(fileURLWithPath: "/tmp/requirements.txt")
+        let dependencies = SetupCatalog.dependencies(applicationSupport: support, requirements: requirements)
+        XCTAssertEqual(Set(dependencies.map(\.id)), Set(SetupDependencyID.allCases))
+        XCTAssertEqual(dependencies.count, SetupDependencyID.allCases.count)
+    }
+
+    func testWhisperInstallUsesApplicationSupportAndBundledRequirements() {
+        let support = URL(fileURLWithPath: "/tmp/android-bridge-setup")
+        let requirements = URL(fileURLWithPath: "/Applications/AndroidBridge.app/requirements.txt")
+        let whisper = SetupCatalog.dependencies(applicationSupport: support, requirements: requirements)
+            .first { $0.id == .whisper }
+        XCTAssertTrue(whisper?.installArguments.joined(separator: " ").contains(support.path) == true)
+        XCTAssertTrue(whisper?.installArguments.joined(separator: " ").contains(requirements.path) == true)
+    }
+
+    func testEveryInstallCommandIsFixedAndNonempty() {
+        let dependencies = SetupCatalog.dependencies(applicationSupport: URL(fileURLWithPath: "/tmp/support"), requirements: URL(fileURLWithPath: "/tmp/requirements"))
+        XCTAssertTrue(dependencies.allSatisfy { $0.installProgram.hasPrefix("/") && !$0.installArguments.isEmpty })
+    }
+
+    func testDetectorRecognizesBundledWhisperEnvironment() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let python = root.appendingPathComponent("Tools/mlx_whisper/.venv/bin/python")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        XCTAssertTrue(FileManager.default.createFile(atPath: python.path, contents: Data("#!/bin/sh\n".utf8)))
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: python.path)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let detector = SetupDetector(applicationSupport: root.appendingPathComponent("support"), bundledWhisperPython: python)
+        XCTAssertEqual(detector.state(for: .whisper), .installed(python.path))
+    }
+}
+
 final class StreamPropertyTests: XCTestCase {
     func testChunkReassembleRoundTrip() {
         property("PBT-03: chunk then reassemble round-trips") <- forAll { (blob: Blob) in

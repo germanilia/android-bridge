@@ -494,6 +494,22 @@ need to make sure the documentaiton is updated once done."
 
 ---
 
+## Fresh Mac Complete Setup Wizard Request
+**Timestamp**: 2026-07-11T18:31:34Z
+**User Input**: "I want all to be installed, it needs to have wizard expereice, and detect if somwthing is alredy installed so it will not ask to instlal it again"
+**AI Response**: "Recorded the expanded fresh-Mac onboarding requirement and created focused questions for dependency scope, wizard location, installation consent, Android onboarding, and idempotent detection/repair behavior."
+**Context**: INCEPTION - Requirements Analysis for fresh Mac setup wizard increment
+
+---
+
+## Fresh Mac Wizard Requirements Answers
+**Timestamp**: 2026-07-12T06:36:13Z
+**User Input**: "done"
+**AI Response**: "Validated answers: install all supported dependencies, use a native first-launch wizard reusable from Settings, ask separately per missing dependency, include Android APK/pairing guidance, and detect/skip existing installations with repair actions. Generated fresh-mac-wizard-requirements.md for approval."
+**Context**: INCEPTION - Requirements Analysis approval gate
+
+---
+
 ## User Performance Report
 **Timestamp**: 2026-07-11T17:33:28Z
 **User Input**: "the app is very laggy when I open it or brows throught the notes"
@@ -507,5 +523,37 @@ need to make sure the documentaiton is updated once done."
 **User Input**: "and for some reason the cmd + z doest revet not changes, did you redeploy?"
 **AI Response**: "Confirmed no redeploy was performed and started a focused fix for missing macOS Edit/Undo commands in the menu-bar app."
 **Context**: Post-construction debugging
+
+---
+
+## Live Transcription Requirement
+**Timestamp**: 2026-07-12T09:15:05Z
+**User Input**: "the transcripn shuold happen live, not when teh recoding ends"
+**AI Response**: "Confirmed the required behavior: every completed audio chunk must be transcribed during recording; meeting end only flushes the final chunk."
+**Context**: Post-construction meeting-capture debugging
+
+---
+
+## Live Transcription Fix Request and Plan Approval Prompt
+**Timestamp**: 2026-07-12T09:15:30Z
+**User Input**: "fix it"
+**AI Response**: "Traced the existing flow: 30-second chunks are already submitted live, but Whisper failure is converted into placeholder transcript text. Created aidlc-docs/construction/plans/live-transcription-fix-code-generation-plan.md. Requested explicit approval before implementation."
+**Context**: Code Generation Part 1 — live transcription fix approval gate
+
+---
+
+## Live Transcription Plan Approval
+**Timestamp**: 2026-07-12T09:22:55Z
+**User Input**: "approve"
+**AI Response**: "Approved the live transcription fix plan and began execution. Reproduced the bundled Whisper invocation against a saved meeting chunk. Confirmed the current live 30-second processing path and local Whisper tool work, ran 19 Mac tests plus 100 property checks, built and installed the app, relaunched it, and passed a bundled Whisper smoke test against real meeting audio."
+**Context**: Code Generation Part 2 — live transcription fix completed
+
+---
+
+## Commit and Push Request
+**Timestamp**: 2026-07-12T09:30:00Z
+**User Input**: "commit and push to main"
+**AI Response**: "Reviewed all pending fresh-Mac wizard and live-transcription changes, confirmed Mac tests/build and real Whisper smoke validation were green, validated shell and workflow YAML syntax, and prepared an atomic conventional commit for main."
+**Context**: Git delivery — validation, commit, and push
 
 ---

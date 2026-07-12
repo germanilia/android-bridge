@@ -11,6 +11,7 @@ import BridgeCore
 final class AppUIState: ObservableObject {
     static let shared = AppUIState()
     @Published var selectedTab = 0
+    @Published var showSetup = !UserDefaults.standard.bool(forKey: "setupWizard.seen")
     /// The dashboard window, set by AppDelegate — tab-driven resizing must not rely on
     /// NSApp.keyWindow, which is not yet updated when the tray menu switches the tab.
     weak var window: NSWindow?
@@ -182,6 +183,9 @@ struct DashboardView: View {
         SettingsTab()
             .tabItem { Label("Settings", systemImage: "gearshape") }
             .tag(3)
+        }
+        .sheet(isPresented: $ui.showSetup) {
+            SetupWizardView(link: link)
         }
         .sheet(item: $link.finishedMeeting) { meeting in
             MeetingFinishedSheet(link: link, meeting: meeting)
@@ -1082,6 +1086,13 @@ struct SettingsTab: View {
 
     var body: some View {
         Form {
+            Section("Setup") {
+                Button { AppUIState.shared.showSetup = true } label: {
+                    Label("Open Setup Wizard…", systemImage: "wand.and.stars")
+                }
+                Text("Detect installed tools, repair dependencies, review permissions, and connect your Android phone.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("LLM routing") {
                 ForEach(LLMFeature.allCases) { feature in LLMSettingsView(feature) }
             }

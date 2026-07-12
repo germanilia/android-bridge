@@ -65,6 +65,8 @@ Executed autonomously (user away; recommended defaults taken). Approval gates re
 - [ ] Operations (placeholder)
 
 ### 🔁 POST-CONSTRUCTION FEATURE INCREMENTS
+- [x] Increment 7: Fresh Mac setup wizard — native first-launch/Settings wizard detects and repairs dependencies, asks per install, guides permissions, provides APK QR/pairing readiness, supports managed MLX Whisper, and uses a stable CI signing identity so TCC grants persist across updates. Tests/build/install green; one-time permission migration required from prior ad-hoc builds.
+- [x] Live meeting transcription fix — confirmed 30-second chunks are transcribed while recording; fixed deployed local Whisper resolution via the managed Application Support environment with bundled-tool fallback. Mac tests, app build/install, and bundled Whisper smoke test passed on 2026-07-12.
 - [x] Increment 6: Continuous installation artifacts — every push to `main` builds and publishes a rolling `latest-build` prerelease containing the macOS archive, debug-signed Android APK, and SHA-256 checksums. Public `install.sh` always installs the newest Mac build; README links the APK directly. Shell/YAML/macOS packaging/Android APK/checksum validation green.
 - [x] Call-control compatibility fix — Mac now sends protocol-aligned `answer`/`decline`; Android accepts both new names and legacy aliases, and dialing is centralized through `dialFromMac(...)`.
 - [ ] Increment 1: Call control hardening — permission/status reporting, call-action result feedback to Mac, active call state updates, target Samsung hardware verification.

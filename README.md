@@ -111,8 +111,14 @@ curl -fsSL https://raw.githubusercontent.com/germanilia/android-bridge/main/inst
 
 The installer downloads the rolling `latest-build` release over HTTPS, verifies its SHA-256
 checksum, installs `AndroidBridge.app` into `/Applications`, and launches it. It replaces an existing
-installation and may request administrator privileges when `/Applications` is not writable. It does
-not install optional Ollama, pi, ffmpeg, Python, or MLX Whisper dependencies.
+installation and may request administrator privileges when `/Applications` is not writable.
+
+On first launch, the native Setup Wizard detects Homebrew, ffmpeg, Python/MLX Whisper, Ollama,
+`gemma4:e4b`, Node.js, and pi. Existing valid installations are marked complete automatically. For
+each missing tool, the wizard explains the command and asks separately before installing it; nothing
+is silently installed or replaced. The wizard also guides macOS permissions, provides a QR code and
+download link for the Android APK, verifies phone connection, and remains available from Settings
+for later repair or reinstallation.
 
 Download the latest debug-signed Android APK from the same rolling release:
 

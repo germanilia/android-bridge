@@ -562,10 +562,12 @@ public final class WhisperTranscriptionService {
     }
 
     private func runWhisper(_ file: URL) -> String? {
+        let supportPython = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("AndroidBridge/mlx-whisper/bin/python")
         let resourceTool = Bundle.main.resourceURL?.appendingPathComponent("Tools/mlx_whisper/bin/mlx_whisper")
         let sourceTool = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Tools/mlx_whisper/bin/mlx_whisper")
         let local = [resourceTool, sourceTool].compactMap { $0 }.first { FileManager.default.isExecutableFile(atPath: $0.path) }
-        guard let local else { return nil }
+        guard FileManager.default.isExecutableFile(atPath: supportPython.path) || local != nil else { return nil }
         let audioFile = convertToWavIfNeeded(file) ?? file
         let outputDir = FileManager.default.temporaryDirectory.appendingPathComponent("android-bridge-whisper", isDirectory: true)
         try? FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
@@ -573,9 +575,15 @@ public final class WhisperTranscriptionService {
         let outputFile = outputDir.appendingPathComponent("\(outputName).txt")
         try? FileManager.default.removeItem(at: outputFile)
         let p = Process()
-        p.executableURL = local
         p.environment = environmentWithHomebrewPath()
-        p.arguments = ["--model", "mlx-community/whisper-large-v3-turbo", "--output-dir", outputDir.path, "--output-name", outputName, "--output-format", "txt", "--verbose", "False", audioFile.path]
+        let arguments = ["--model", "mlx-community/whisper-large-v3-turbo", "--output-dir", outputDir.path, "--output-name", outputName, "--output-format", "txt", "--verbose", "False", audioFile.path]
+        if FileManager.default.isExecutableFile(atPath: supportPython.path) {
+            p.executableURL = supportPython
+            p.arguments = ["-m", "mlx_whisper.cli"] + arguments
+        } else {
+            p.executableURL = local
+            p.arguments = arguments
+        }
         try? p.run()
         p.waitUntilExit()
         guard p.terminationStatus == 0 else { return nil }

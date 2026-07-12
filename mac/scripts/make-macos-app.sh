@@ -52,7 +52,7 @@ PLIST
 # build as a new app and re-asks for permissions. Signing with a stable
 # identity (any self-signed "Code Signing" cert in the keychain) keeps the
 # grants across rebuilds.
-IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' 'NR==1 {print $2}')
+IDENTITY="${CODESIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' 'NR==1 {print $2}')}"
 if [ -n "$IDENTITY" ]; then
     echo "› Code-signing with identity: $IDENTITY"
     codesign --force --deep --sign "$IDENTITY" "$APP" >/dev/null 2>&1 || echo "  (codesign skipped)"

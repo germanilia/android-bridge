@@ -7,6 +7,7 @@ import UserNotifications
 import DeviceLinkProtocol
 import Crypto
 import Security
+import AVFoundation
 
 /// A peer discovered on the LAN (Bonjour), with its advertised fingerprint.
 public struct NearbyPeer: Identifiable, Equatable {
@@ -159,15 +160,10 @@ public final class LinkManager: ObservableObject {
 
     private func startAutoMeetingWatch() {
         DispatchQueue.main.async {
-            // Screen Recording gates window-title detection and system-audio
-            // (remote speaker) capture. Show the system dialog only once ever —
-            // re-requesting on every launch turns into a nag; afterwards just
-            // leave a hint in the activity feed.
+            // Never trigger the system permission dialog from automatic meeting
+            // detection. The setup wizard reports the live TCC state and lets the
+            // user open System Settings deliberately.
             if !CGPreflightScreenCaptureAccess() {
-                if !UserDefaults.standard.bool(forKey: "screenCapture.requested") {
-                    UserDefaults.standard.set(true, forKey: "screenCapture.requested")
-                    CGRequestScreenCaptureAccess()
-                }
                 self.pushEvent("⚠️ Screen Recording is off — remote meeting audio won't be captured (System Settings → Privacy & Security)")
             }
             Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in self?.pollVideoMeeting() }
@@ -645,6 +641,10 @@ public final class LinkManager: ObservableObject {
     }
 
     public func startMeetingOnMac() {
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
+            pushEvent("⚠️ Microphone access is required — open Settings → Setup Wizard → Permissions")
+            return
+        }
         let id = macRecorder.start()
         meetingStore.markStarted(meetingId: id, startedAtMs: Int(Date().timeIntervalSince1970 * 1000))
         activeMeetingIds.insert(id)
