@@ -557,3 +557,11 @@ need to make sure the documentaiton is updated once done."
 **Context**: Git delivery — validation, commit, and push
 
 ---
+
+## Post-Construction Bug Fix — Meeting Prompt and Lag
+**Timestamp**: 2026-07-13T10:14:29Z
+**User Input**: "teh applicatoin is very laggy and it keeps poping up hte add to second brain, it should not happen more than once per note, and need ro resolve the performance issues"
+**AI Response**: Fixed repeated finished-meeting Second Brain prompts by persisting prompted meeting IDs in UserDefaults. Reduced Meetings preview lag by caching note Markdown in state and reloading only when notes change, instead of rereading/reparsing on every SwiftUI render/timer tick. Verified with `cd mac && swift test`.
+**Context**: CONSTRUCTION / Post-construction bug fix
+
+---

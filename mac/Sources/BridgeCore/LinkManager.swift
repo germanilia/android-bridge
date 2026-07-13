@@ -50,8 +50,10 @@ public final class LinkManager: ObservableObject {
     @Published public private(set) var macMeetingActive = false
     @Published public private(set) var phoneMeetingActive = false
     /// Set when a recording finalizes so the UI can ask for a title/client and
-    /// file the note into the second brain. The sheet clears it on dismiss.
+    /// file the note into the second brain. Each meeting is prompted at most once.
     @Published public var finishedMeeting: MeetingRecord?
+    private var promptedFinishedMeetingIds: Set<String>
+    private let promptedFinishedMeetingKey = "com.androidbridge.promptedFinishedMeetings"
     private var zoomAutoMeetingActive = false
     private let brainStore = SecondBrainStore()
 
@@ -125,6 +127,7 @@ public final class LinkManager: ObservableObject {
         self.fingerprint = identity.fingerprint
         // Restore known (paired) devices so we auto-reconnect without re-pairing.
         self.pairedFingerprints = Set(UserDefaults.standard.stringArray(forKey: pairedKey) ?? [])
+        self.promptedFinishedMeetingIds = Set(UserDefaults.standard.stringArray(forKey: promptedFinishedMeetingKey) ?? [])
         cleanReceivedFiles()
         macRecorder.onUpdate = { [weak self] in self?.refreshMeetings() }
         macRecorder.onFinished = { [weak self] notes in self?.promptFinishedMeeting(notesURL: notes) }
@@ -851,7 +854,12 @@ public final class LinkManager: ObservableObject {
     private func promptFinishedMeeting(notesURL: URL) {
         let dir = notesURL.deletingLastPathComponent().standardizedFileURL.path
         guard let record = meetingStore.listMeetings().first(where: { $0.url.standardizedFileURL.path == dir }) else { return }
-        DispatchQueue.main.async { self.finishedMeeting = record }
+        DispatchQueue.main.async {
+            if self.promptedFinishedMeetingIds.contains(record.id) { return }
+            self.promptedFinishedMeetingIds.insert(record.id)
+            UserDefaults.standard.set(Array(self.promptedFinishedMeetingIds), forKey: self.promptedFinishedMeetingKey)
+            self.finishedMeeting = record
+        }
     }
 
     /// Save the finished meeting into the second brain under the given client,

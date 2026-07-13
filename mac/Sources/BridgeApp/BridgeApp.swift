@@ -442,9 +442,10 @@ struct MeetingPreview: View {
     @State private var editingTitle = false
     @State private var showBrainPrompt = false
     @State private var showAskDialog = false
+    @State private var noteMarkdown = ""
     @AppStorage("secondBrainClient") private var brainClient = ""
 
-    private var markdown: String { (try? String(contentsOf: meeting.notesURL ?? meeting.url.appendingPathComponent("notes.md"), encoding: .utf8)) ?? "" }
+    private var notesURL: URL { meeting.notesURL ?? meeting.url.appendingPathComponent("notes.md") }
 
     var body: some View {
         GeometryReader { proxy in
@@ -484,7 +485,7 @@ struct MeetingPreview: View {
                         Button("Summary") { copy(meeting.summary) }
                         Button("Transcript") { copy(meeting.transcript) }
                         Button("Chat") { copy(meeting.questions) }
-                        Button("Full note") { copy(markdown) }
+                        Button("Full note") { copy(noteMarkdown) }
                     }
                     Button { showBrainPrompt = true } label: {
                         if link.brainTransferIds.contains(meeting.id) {
@@ -552,9 +553,9 @@ struct MeetingPreview: View {
                     } else {
                         Toggle("Show raw Markdown", isOn: $showRawMarkdown)
                         if showRawMarkdown {
-                            Text(markdownPreviewText(markdown)).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                            Text(markdownPreviewText(noteMarkdown)).font(.system(.body, design: .monospaced)).textSelection(.enabled)
                         } else {
-                            MeetingFullNotePreview(markdown: markdown, baseURL: meeting.url)
+                            MeetingFullNotePreview(markdown: noteMarkdown, baseURL: meeting.url)
                         }
                     }
                     }
@@ -583,7 +584,12 @@ struct MeetingPreview: View {
         }
         .frame(minWidth: 560, maxWidth: .infinity, alignment: .topLeading)
         .layoutPriority(1)
-        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { now = $0 }
+        .task(id: notesURL.path + (meeting.notesUpdatedAt?.description ?? "")) { loadMarkdown() }
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { if meeting.isActive { now = $0 } }
+    }
+
+    private func loadMarkdown() {
+        noteMarkdown = (try? String(contentsOf: notesURL, encoding: .utf8)) ?? ""
     }
 
     /// Single pinned row above the scroll area: note-section tabs plus, on the
