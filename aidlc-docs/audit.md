@@ -565,3 +565,19 @@ need to make sure the documentaiton is updated once done."
 **Context**: CONSTRUCTION / Post-construction bug fix
 
 ---
+
+## Post-Construction Bug Fix — Mac Recording Start
+**Timestamp**: 2026-07-14T07:09:45Z
+**User Input**: "I don't think the recording is starting"
+**AI Response**: Fixed Mac recording start path: request microphone permission when undetermined, show clearer denied-permission message, and only mark meetings active after AVAudioRecorder successfully starts. Verified with `cd mac && swift test`.
+**Context**: CONSTRUCTION / Post-construction bug fix
+
+---
+
+## Post-Construction Bug Fix — Launch Crash
+**Timestamp**: 2026-07-14T08:08:41Z
+**User Input**: "I don't see the app is running?"
+**AI Response**: Diagnosed launch crash from `UNUserNotificationCenter.current()` failing to determine the bundle identifier. Removed startup notification permission calls because the app already uses in-app banners. Verified with `cd mac && swift test`, rebuilt, reinstalled, and confirmed `/Applications/AndroidBridge.app/Contents/MacOS/AndroidBridge` is running.
+**Context**: CONSTRUCTION / Post-construction bug fix
+
+---

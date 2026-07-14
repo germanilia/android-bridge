@@ -20,13 +20,14 @@ public final class MacMeetingRecorder: NSObject, AVAudioRecorderDelegate {
 
     public var isRecording: Bool { recorder != nil }
 
-    public func start() -> String {
+    public func start() -> String? {
         if !meetingId.isEmpty { return meetingId }
         meetingId = UUID().uuidString
         sequence = 0
         _ = store.meetingDir(meetingId)
-        startChunk()
-        return meetingId
+        if startChunk() { return meetingId }
+        meetingId = ""
+        return nil
     }
 
     public func stop() {
@@ -47,7 +48,7 @@ public final class MacMeetingRecorder: NSObject, AVAudioRecorderDelegate {
         }
     }
 
-    private func startChunk() {
+    private func startChunk() -> Bool {
         chunkStarted = Date()
         let media = store.meetingDir(meetingId).appendingPathComponent("media", isDirectory: true)
         let file = media.appendingPathComponent(String(format: "you-chunk-%04d.m4a", sequence))
@@ -59,21 +60,22 @@ public final class MacMeetingRecorder: NSObject, AVAudioRecorderDelegate {
             AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
             AVEncoderBitRateKey: 64_000,
         ]
-        recorder = try? AVAudioRecorder(url: file, settings: settings)
-        recorder?.delegate = self
-        recorder?.record()
+        guard let recorder = try? AVAudioRecorder(url: file, settings: settings), recorder.record() else { return false }
+        self.recorder = recorder
+        recorder.delegate = self
         if #available(macOS 13.0, *), let systemFile {
             let systemRecorder = SystemAudioRecorder()
             self.systemRecorder = systemRecorder
             systemRecorder.start(to: systemFile)
         }
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in self?.rotateChunk() }
+        return true
     }
 
     private func rotateChunk() {
         finishChunk(of: meetingId)
         sequence += 1
-        startChunk()
+        if !startChunk() { stop() }
     }
 
     private func finishChunk(of id: String) {

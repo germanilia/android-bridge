@@ -24,8 +24,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
-        UNUserNotificationCenter.current().delegate = self
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
 
         // Pin the item near the RIGHT edge of the menu bar: a crowded menu bar hides the
         // leftmost items first, so sitting rightmost keeps us visible. One-time migration

@@ -105,7 +105,6 @@ public final class LinkManager: ObservableObject {
     }
 
     public func requestNotificationAuthorization() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
     private func postNotification(title: String, body: String, userInfo: [String: String] = [:]) {
@@ -644,11 +643,24 @@ public final class LinkManager: ObservableObject {
     }
 
     public func startMeetingOnMac() {
-        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
-            pushEvent("⚠️ Microphone access is required — open Settings → Setup Wizard → Permissions")
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            startAuthorizedMacRecording()
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                if granted { self.startAuthorizedMacRecording() }
+                else { self.pushEvent("⚠️ Microphone access is required — enable it in System Settings → Privacy & Security → Microphone") }
+            }
+        default:
+            pushEvent("⚠️ Microphone access is required — enable it in System Settings → Privacy & Security → Microphone")
+        }
+    }
+
+    private func startAuthorizedMacRecording() {
+        guard let id = macRecorder.start() else {
+            pushEvent("⚠️ Mac recording failed to start")
             return
         }
-        let id = macRecorder.start()
         meetingStore.markStarted(meetingId: id, startedAtMs: Int(Date().timeIntervalSince1970 * 1000))
         activeMeetingIds.insert(id)
         DispatchQueue.main.async { self.macMeetingActive = true }
