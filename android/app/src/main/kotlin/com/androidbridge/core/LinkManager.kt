@@ -66,6 +66,7 @@ class LinkManager(
     private val router = MessageRouter()
     private val outbox = Channel<Message>(Channel.UNLIMITED)
     private val sendLock = Any()
+    private val brainFolder = SecondBrainFolder(context)
 
     private val _status = MutableStateFlow(ConnectionState.DISCONNECTED)
     val status: StateFlow<ConnectionState> = _status.asStateFlow()
@@ -81,6 +82,20 @@ class LinkManager(
     val peerScreen: StateFlow<Bitmap?> = _peerScreen.asStateFlow()
     private val _receivedFiles = MutableStateFlow<List<ReceivedFile>>(emptyList())
     val receivedFiles: StateFlow<List<ReceivedFile>> = _receivedFiles.asStateFlow()
+    private val _brainNodes = MutableStateFlow<List<SecondBrainNode>>(emptyList())
+    val brainNodes: StateFlow<List<SecondBrainNode>> = _brainNodes.asStateFlow()
+    private val _selectedBrainPath = MutableStateFlow("")
+    val selectedBrainPath: StateFlow<String> = _selectedBrainPath.asStateFlow()
+    private val _selectedBrainContent = MutableStateFlow("")
+    val selectedBrainContent: StateFlow<String> = _selectedBrainContent.asStateFlow()
+    private val _brainSearchResults = MutableStateFlow<List<SecondBrainNode>>(emptyList())
+    val brainSearchResults: StateFlow<List<SecondBrainNode>> = _brainSearchResults.asStateFlow()
+    private val _brainStatus = MutableStateFlow("")
+    val brainStatus: StateFlow<String> = _brainStatus.asStateFlow()
+    private val _brainHasFolder = MutableStateFlow(brainFolder.hasFolder())
+    val brainHasFolder: StateFlow<Boolean> = _brainHasFolder.asStateFlow()
+    private val _brainFolderName = MutableStateFlow(brainFolder.folderName())
+    val brainFolderName: StateFlow<String> = _brainFolderName.asStateFlow()
 
     val fingerprint: String get() = identity.fingerprint
     val connected: Boolean get() = session != null
@@ -131,7 +146,11 @@ class LinkManager(
     }
 
     init {
-        router.register(MessageTypes.CLIP_UPDATE) { m -> field(m, "text").let { _lastClipboard.value = it; pushEvent("📋 Clipboard: $it"); notify("Clipboard received", "Tap to copy to Android clipboard", clipboardCopyIntent(it)) } }
+        router.register(MessageTypes.CLIP_UPDATE) { m ->
+            val text = field(m, "text")
+            _lastClipboard.value = text
+            pushEvent("📋 Clipboard: $text")
+        }
         router.register(MessageTypes.NOTIF_POSTED) { m ->
             val t = field(m, "title"); val x = field(m, "text")
             pushEvent("🔔 $t: $x"); notify(t, x)
@@ -201,6 +220,7 @@ class LinkManager(
         registerService(srv.localPort)
         startBrowsing()
         _status.value = ConnectionState.DISCOVERING
+        if (brainFolder.hasFolder()) refreshSecondBrain()
     }
 
     /** Single serialized writer — all outbound messages go through one coroutine so socket writes
@@ -366,6 +386,49 @@ class LinkManager(
 
     // Feature senders
     fun sendClipboard(text: String) = send(Mappers.clipboard(text))
+
+    fun setBrainFolder(uri: Uri) {
+        brainFolder.setFolder(uri)
+        _brainHasFolder.value = true
+        _brainFolderName.value = brainFolder.folderName()
+        refreshSecondBrain()
+    }
+
+    fun refreshSecondBrain() {
+        scope.launch(Dispatchers.IO) {
+            val nodes = brainFolder.nodes()
+            _brainNodes.value = nodes
+            _brainStatus.value = "${nodes.count { !it.isDirectory }} notes in ${brainFolder.folderName()}"
+        }
+    }
+
+    fun selectSecondBrainNode(path: String) {
+        _selectedBrainPath.value = path
+        scope.launch(Dispatchers.IO) { _selectedBrainContent.value = brainFolder.content(path) }
+    }
+
+    fun saveSecondBrainNode(path: String, content: String) {
+        scope.launch(Dispatchers.IO) {
+            brainFolder.save(path, content)
+            _brainNodes.value = brainFolder.nodes()
+            if (_selectedBrainPath.value == path) _selectedBrainContent.value = content
+            _brainStatus.value = "Saved ${path.substringAfterLast('/')}"
+        }
+    }
+
+    fun deleteSecondBrainNode(path: String) {
+        if (_selectedBrainPath.value == path) { _selectedBrainPath.value = ""; _selectedBrainContent.value = "" }
+        scope.launch(Dispatchers.IO) {
+            brainFolder.delete(path)
+            _brainNodes.value = brainFolder.nodes()
+            _brainStatus.value = "Deleted ${path.substringAfterLast('/')}"
+        }
+    }
+
+    fun searchSecondBrain(query: String) {
+        scope.launch(Dispatchers.IO) { _brainSearchResults.value = brainFolder.search(query) }
+    }
+
     fun sendTestNotification() = send(Mappers.notification("com.demo.app", "Test notification", "Hello from $deviceName", 0))
     fun sendTestSms() = send(Mappers.smsReceived(1, "+1 555 0100", "Test SMS from $deviceName", 0))
     fun sendSmsReceived(address: String, body: String, receivedAt: Long) = send(Mappers.smsReceived(0, address, body, receivedAt))

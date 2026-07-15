@@ -78,15 +78,30 @@ public final class SecondBrainStore {
         _ = try run(["check"])
     }
 
-    public func save(path: String, content: String) throws {
+    public func save(path: String, content: String, modifiedAtMs: Int? = nil) throws {
+        guard Self.isMarkdownPath(path) else { throw NSError(domain: "SecondBrain", code: 2, userInfo: [NSLocalizedDescriptionKey: "Only Markdown notes are supported"]) }
+        if let modifiedAtMs, self.modifiedAtMs(path: path) > modifiedAtMs { return }
         let url = rootURL.appendingPathComponent(path)
+        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try content.write(to: url, atomically: true, encoding: .utf8)
         _ = try run(["check"])
     }
 
-    public func deleteNote(path: String) throws {
+    public func deleteNote(path: String, modifiedAtMs: Int? = nil) throws {
+        guard Self.isMarkdownPath(path) else { throw NSError(domain: "SecondBrain", code: 2, userInfo: [NSLocalizedDescriptionKey: "Only Markdown notes are supported"]) }
+        if let modifiedAtMs, self.modifiedAtMs(path: path) > modifiedAtMs { return }
         _ = try run(["delete-note", path])
         _ = try run(["check"])
+    }
+
+    public func modifiedAtMs(path: String) -> Int {
+        let url = rootURL.appendingPathComponent(path)
+        let date = (try? fm.attributesOfItem(atPath: url.path)[.modificationDate] as? Date) ?? .distantPast
+        return Int(date.timeIntervalSince1970 * 1000)
+    }
+
+    public static func isMarkdownPath(_ path: String) -> Bool {
+        path.hasSuffix(".md") && !path.contains("..") && !path.hasPrefix("/")
     }
 
     public func answer(path: String, question: String) throws -> String {

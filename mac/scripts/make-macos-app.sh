@@ -74,7 +74,9 @@ if [ "${NO_INSTALL:-0}" != "1" ]; then
     pkill -f "$INSTALLED/Contents/MacOS/AndroidBridge" >/dev/null 2>&1 || true
     sleep 1
     rm -rf "$INSTALLED"
-    cp -R "$APP" "$INSTALLED"
+    mkdir -p "$INSTALLED"
+    cp -R "$APP/Contents" "$INSTALLED/Contents"
+    test -f "$INSTALLED/Contents/Info.plist"
     open "$INSTALLED"
     echo "✓ Installed and relaunched $INSTALLED"
 fi

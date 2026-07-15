@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// Phone-dependent menu items are greyed out while the phone is not connected.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(openScreen) { return LinkManager.shared.status == .connected }
+        if menuItem.action == #selector(pushClipboard) { return LinkManager.shared.status == .connected }
         return true
     }
     private var statusItem: NSStatusItem!
@@ -48,6 +49,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         menu.addItem(appMenuItem("Open Second Brain", action: #selector(openSecondBrain), key: "b"))
         menu.addItem(appMenuItem("Open Settings", action: #selector(openSettings), key: ","))
         menu.addItem(appMenuItem("Open Phone Screen", action: #selector(openScreen), key: "s"))
+        menu.addItem(.separator())
+        menu.addItem(quickActionsMenuItem())
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Android Bridge", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
@@ -93,6 +96,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func appMenuItem(_ title: String, action: Selector, key: String) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
         item.target = self
+        return item
+    }
+
+    private func quickActionsMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "Quick Actions", action: nil, keyEquivalent: "")
+        let menu = NSMenu(title: "Quick Actions")
+        menu.addItem(appMenuItem("Push Clipboard", action: #selector(pushClipboard), key: ""))
+        item.submenu = menu
         return item
     }
 
@@ -164,6 +175,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     @objc func openScreen() {
         openScreenInternal(requestShare: true)
+    }
+
+    @objc func pushClipboard() {
+        LinkManager.shared.sendClipboard(NSPasteboard.general.string(forType: .string) ?? "")
     }
 
     func openScreenInternal(requestShare: Bool) {
@@ -303,6 +318,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         m.addItem(appMenuItem("Open Second Brain", action: #selector(openSecondBrain), key: ""))
         m.addItem(appMenuItem("Open Settings", action: #selector(openSettings), key: ""))
         m.addItem(appMenuItem("Open Phone Screen", action: #selector(openScreen), key: ""))
+        m.addItem(.separator())
+        m.addItem(quickActionsMenuItem())
         return m
     }
 }

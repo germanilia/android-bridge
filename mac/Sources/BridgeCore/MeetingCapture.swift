@@ -17,6 +17,8 @@ public struct MeetingPhoto: Codable, Equatable {
 public struct MeetingRecord: Identifiable, Equatable {
     public let id: String
     public let title: String
+    public let company: String
+    public let brainPath: String?
     public let url: URL
     public let notesURL: URL?
     public let date: Date
@@ -165,6 +167,16 @@ public final class MeetingStore {
         _ = writeNotes(in: dir, meetingId: clean, photos: [], generateSummary: false)
     }
 
+    public func setCompany(_ meeting: MeetingRecord, to company: String) {
+        let clean = company.trimmingCharacters(in: .whitespacesAndNewlines)
+        let url = meeting.url.appendingPathComponent("company.txt")
+        clean.isEmpty ? try? fm.removeItem(at: url) : try? clean.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    public func setBrainPath(_ meeting: MeetingRecord, to path: String) {
+        try? path.write(to: meeting.url.appendingPathComponent("brainPath.txt"), atomically: true, encoding: .utf8)
+    }
+
     /// Re-runs Whisper over every placeholder segment (chunks recorded while
     /// transcription was failing, e.g. ffmpeg missing from PATH) and rebuilds
     /// the summary and notes from the recovered text.
@@ -262,9 +274,16 @@ public final class MeetingStore {
         let imageFiles = mediaFiles.filter { ["jpg", "jpeg", "png"].contains($0.pathExtension.lowercased()) }.sorted { $0.lastPathComponent < $1.lastPathComponent }
         let date = startedDate(in: dir) ?? parsedDate(from: dir.lastPathComponent) ?? ((try? dir.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast)
         let notesUpdatedAt = (try? notes.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+        let title = titleOverride(in: dir) ?? displayTitle(dir.lastPathComponent)
+        let savedBrainPath = brainPath(in: dir)
+        let brain = savedBrainPath == nil ? inferredBrainTransfer(title: title, date: date) : nil
+        if let brain { try? brain.path.write(to: dir.appendingPathComponent("brainPath.txt"), atomically: true, encoding: String.Encoding.utf8) }
+        if companyOverride(in: dir) == nil, let brain { try? brain.company.write(to: dir.appendingPathComponent("company.txt"), atomically: true, encoding: String.Encoding.utf8) }
         return MeetingRecord(
             id: dir.lastPathComponent,
-            title: titleOverride(in: dir) ?? displayTitle(dir.lastPathComponent),
+            title: title,
+            company: companyOverride(in: dir) ?? brain?.company ?? "",
+            brainPath: savedBrainPath ?? brain?.path,
             url: dir,
             notesURL: fm.fileExists(atPath: notes.path) ? notes : nil,
             date: date,
@@ -305,6 +324,43 @@ public final class MeetingStore {
     private func titleOverride(in dir: URL) -> String? {
         let raw = try? String(contentsOf: dir.appendingPathComponent("title.txt"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
         return raw?.isEmpty == false ? raw : nil
+    }
+
+    private func companyOverride(in dir: URL) -> String? {
+        let raw = try? String(contentsOf: dir.appendingPathComponent("company.txt"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        return raw?.isEmpty == false ? raw : nil
+    }
+
+    private func brainPath(in dir: URL) -> String? {
+        let raw = try? String(contentsOf: dir.appendingPathComponent("brainPath.txt"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        return raw?.isEmpty == false ? raw : nil
+    }
+
+    private var brainNoteStamp: DateFormatter {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return formatter
+    }
+
+    private func inferredBrainTransfer(title: String, date: Date) -> (company: String, path: String)? {
+        let home = fm.homeDirectoryForCurrentUser
+        let configured = UserDefaults.standard.string(forKey: "secondBrain.root")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let env = ProcessInfo.processInfo.environment["BRAIN_ROOT"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let brainRoot = URL(fileURLWithPath: configured?.isEmpty == false ? configured! : (env?.isEmpty == false ? env! : home.appendingPathComponent("second_brain").path))
+        let meetings = brainRoot.appendingPathComponent("work/sela/meetings", isDirectory: true)
+        let stamp = brainNoteStamp.string(from: date)
+        let files = fm.enumerator(at: meetings, includingPropertiesForKeys: nil)?.compactMap { $0 as? URL } ?? []
+        for file in files where file.pathExtension == "md" && file.lastPathComponent != "index.md" {
+            let rel = String(file.path.dropFirst(brainRoot.path.count + 1))
+            let parts = rel.split(separator: "/")
+            guard parts.count >= 5, let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            if text.contains(stamp), text.contains(title) {
+                let line = text.components(separatedBy: "\n").first { $0.hasPrefix("Meeting with ") }
+                let company = line.map { String(String($0.dropFirst("Meeting with ".count)).components(separatedBy: ", captured").first ?? "") }
+                return (company ?? String(parts[3]), rel)
+            }
+        }
+        return nil
     }
 
     private func startedDate(in dir: URL) -> Date? {

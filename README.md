@@ -36,6 +36,9 @@ The Mac app also includes local-only productivity tools that work without a phon
 - **Second Brain on Mac**
   - Browse, read, search, edit, create, delete, and chat with notes in `BRAIN_ROOT` (defaults to `~/second_brain`).
   - pi-backed second-brain actions launch pi with only the second-brain skill loaded; local Ollama remains the default.
+- **Second Brain on Android (via Syncthing)**
+  - The phone views and edits the same Markdown notes from a Syncthing-synced folder (granted once via the folder picker).
+  - Sync is handled by Syncthing — with an always-on home-server node over Tailscale — not the device link. See [`aidlc-docs/inception/decisions/second-brain-syncthing.md`](aidlc-docs/inception/decisions/second-brain-syncthing.md).
 - **Local-first encrypted transport**
   - No backend service.
   - No account.

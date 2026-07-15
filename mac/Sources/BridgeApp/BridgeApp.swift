@@ -43,6 +43,7 @@ struct DashboardView: View {
     @State private var meetingSearch = ""
     @State private var speakerRename = [String: String]()
     @State private var meetingRename = [String: String]()
+    @State private var meetingCompany = [String: String]()
     @State private var meetingDateFilter = Date()
     @State private var filterByDate = false
     @State private var selectedMeetingId: String?
@@ -172,7 +173,7 @@ struct DashboardView: View {
         .tabItem { Label("Bridge", systemImage: "arrow.left.arrow.right") }
         .tag(0)
 
-        MeetingCaptureTab(link: link, selectedMeetings: $selectedMeetings, meetingQuestions: $meetingQuestions, meetingSearch: $meetingSearch, speakerRename: $speakerRename, meetingRename: $meetingRename, meetingDateFilter: $meetingDateFilter, filterByDate: $filterByDate, selectedMeetingId: $selectedMeetingId, showRawMarkdown: $showRawMarkdown)
+        MeetingCaptureTab(link: link, selectedMeetings: $selectedMeetings, meetingQuestions: $meetingQuestions, meetingSearch: $meetingSearch, speakerRename: $speakerRename, meetingRename: $meetingRename, meetingCompany: $meetingCompany, meetingDateFilter: $meetingDateFilter, filterByDate: $filterByDate, selectedMeetingId: $selectedMeetingId, showRawMarkdown: $showRawMarkdown)
             .tabItem { Label("Meetings", systemImage: "note.text") }
             .tag(1)
 
@@ -210,18 +211,28 @@ struct MeetingCaptureTab: View {
     @Binding var meetingSearch: String
     @Binding var speakerRename: [String: String]
     @Binding var meetingRename: [String: String]
+    @Binding var meetingCompany: [String: String]
     @Binding var meetingDateFilter: Date
     @Binding var filterByDate: Bool
     @Binding var selectedMeetingId: String?
     @Binding var showRawMarkdown: Bool
+    @State private var sortByCompany = false
 
     private var filteredMeetings: [MeetingRecord] {
         let q = meetingSearch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return link.meetings.filter { meeting in
-            let matchesText = q.isEmpty || [meeting.title, meeting.summary, meeting.transcript, meeting.questions].joined(separator: "\n").lowercased().contains(q)
+        let meetings = link.meetings.filter { meeting in
+            let matchesText = q.isEmpty || [meeting.title, meeting.company, meeting.summary, meeting.transcript, meeting.questions].joined(separator: "\n").lowercased().contains(q)
             let matchesDate = !filterByDate || Calendar.current.isDate(meeting.date, inSameDayAs: meetingDateFilter)
             return matchesText && matchesDate
         }
+        if sortByCompany {
+            return meetings.sorted {
+                let left = $0.company.isEmpty ? "~" : $0.company.lowercased()
+                let right = $1.company.isEmpty ? "~" : $1.company.lowercased()
+                return left == right ? $0.date > $1.date : left < right
+            }
+        }
+        return meetings
     }
 
     private var selectedMeeting: MeetingRecord? {
@@ -250,10 +261,12 @@ struct MeetingCaptureTab: View {
                 }
                 Text("Live chunks are transcribed as they arrive. Meetings stay local and searchable.")
                     .font(.callout).foregroundStyle(.secondary)
-                TextField("Search meetings, transcript, Q&A", text: $meetingSearch).textFieldStyle(.roundedBorder)
+                TextField("Search meetings, company, transcript, Q&A", text: $meetingSearch).textFieldStyle(.roundedBorder)
                 HStack {
                     Toggle("Filter date", isOn: $filterByDate)
                     DatePicker("", selection: $meetingDateFilter, displayedComponents: .date).labelsHidden()
+                    Spacer()
+                    Toggle("Sort by customer", isOn: $sortByCompany)
                 }
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
@@ -282,7 +295,13 @@ struct MeetingCaptureTab: View {
                         meeting: meeting,
                         selected: selectedMeetings.contains(meeting.id),
                         name: Binding(get: { meetingRename[meeting.id] ?? meeting.title }, set: { meetingRename[meeting.id] = $0 }),
+                        company: Binding(get: { meetingCompany[meeting.id] ?? meeting.company }, set: { meetingCompany[meeting.id] = $0 }),
                         onRename: { link.renameMeeting(meeting, to: meetingRename[meeting.id] ?? meeting.title); meetingRename[meeting.id] = nil },
+                        onChangeCompany: {
+                            let company = meetingCompany[meeting.id] ?? meeting.company
+                            if company.trimmingCharacters(in: .whitespacesAndNewlines) != meeting.company { link.changeMeetingCompany(meeting, to: company) }
+                            meetingCompany[meeting.id] = nil
+                        },
                         onDelete: {
                             selectedMeetings.remove(meeting.id)
                             if selectedMeetingId == meeting.id { selectedMeetingId = nil }
@@ -307,10 +326,16 @@ struct MeetingCaptureTab: View {
                     meeting: meeting,
                     question: Binding(get: { meetingQuestions[meeting.id] ?? "" }, set: { meetingQuestions[meeting.id] = $0 }),
                     meetingName: Binding(get: { meetingRename[meeting.id] ?? meeting.title }, set: { meetingRename[meeting.id] = $0 }),
+                    companyName: Binding(get: { meetingCompany[meeting.id] ?? meeting.company }, set: { meetingCompany[meeting.id] = $0 }),
                     speakerRename: $speakerRename,
                     showRawMarkdown: $showRawMarkdown,
                     onAsk: { link.askMeetingQuestion(meeting, question: meetingQuestions[meeting.id] ?? ""); meetingQuestions[meeting.id] = "" },
                     onRenameMeeting: { link.renameMeeting(meeting, to: meetingRename[meeting.id] ?? meeting.title); meetingRename[meeting.id] = nil },
+                    onChangeCompany: {
+                        let company = meetingCompany[meeting.id] ?? meeting.company
+                        if company.trimmingCharacters(in: .whitespacesAndNewlines) != meeting.company { link.changeMeetingCompany(meeting, to: company) }
+                        meetingCompany[meeting.id] = nil
+                    },
                     onRenameSpeaker: { oldName, newName in link.renameSpeaker(meeting, from: oldName, to: newName); speakerRename["\(meeting.id)|\(oldName)"] = nil }
                 )
             } else {
@@ -330,7 +355,9 @@ struct MeetingListRow: View {
     let meeting: MeetingRecord
     let selected: Bool
     @Binding var name: String
+    @Binding var company: String
     let onRename: () -> Void
+    let onChangeCompany: () -> Void
     let onDelete: () -> Void
     let onToggle: () -> Void
     @State private var editing = false
@@ -341,21 +368,23 @@ struct MeetingListRow: View {
             Button(action: onToggle) { Image(systemName: selected ? "checkmark.circle.fill" : "circle") }.buttonStyle(.plain)
             VStack(alignment: .leading, spacing: 4) {
                 if editing {
-                    TextField("Meeting name", text: $name).textFieldStyle(.roundedBorder).onSubmit { onRename(); editing = false }
+                    TextField("Meeting name", text: $name).textFieldStyle(.roundedBorder)
+                    TextField("Customer", text: $company).textFieldStyle(.roundedBorder).onSubmit { onRename(); onChangeCompany(); editing = false }
                 } else {
                     Text(meeting.title).font(.headline).lineLimit(1)
                 }
                 Text(meeting.date.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
+                Text(meeting.company.isEmpty ? "No customer" : meeting.company).font(.caption).foregroundStyle(meeting.company.isEmpty ? .tertiary : .secondary)
                 Text("\(meeting.audioCount) recordings · \(meeting.photoCount) images").font(.caption2).foregroundStyle(.secondary)
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 8) {
                 if meeting.isActive { PulsingDot() }
                 if editing {
-                    Button { onRename(); editing = false } label: { Image(systemName: "checkmark.circle.fill") }.buttonStyle(.plain)
-                    Button { name = meeting.title; editing = false } label: { Image(systemName: "xmark.circle") }.buttonStyle(.plain)
+                    Button { onRename(); onChangeCompany(); editing = false } label: { Image(systemName: "checkmark.circle.fill") }.buttonStyle(.plain)
+                    Button { name = meeting.title; company = meeting.company; editing = false } label: { Image(systemName: "xmark.circle") }.buttonStyle(.plain)
                 } else {
-                    Button { name = meeting.title; editing = true } label: { Image(systemName: "pencil") }.buttonStyle(.plain)
+                    Button { name = meeting.title; company = meeting.company; editing = true } label: { Image(systemName: "pencil") }.buttonStyle(.plain)
                     Button(role: .destructive, action: onDelete) { Image(systemName: "trash") }.buttonStyle(.plain)
                 }
             }
@@ -428,10 +457,12 @@ struct MeetingPreview: View {
     let meeting: MeetingRecord
     @Binding var question: String
     @Binding var meetingName: String
+    @Binding var companyName: String
     @Binding var speakerRename: [String: String]
     @Binding var showRawMarkdown: Bool
     let onAsk: () -> Void
     let onRenameMeeting: () -> Void
+    let onChangeCompany: () -> Void
     let onRenameSpeaker: (String, String) -> Void
     @State private var player: AVPlayer?
     @State private var now = Date()
@@ -440,6 +471,7 @@ struct MeetingPreview: View {
     @State private var noteTab = "Summary"
     @State private var showRecordings = false
     @State private var editingTitle = false
+    @State private var editingCompany = false
     @State private var showBrainPrompt = false
     @State private var showAskDialog = false
     @State private var noteMarkdown = ""
@@ -474,6 +506,16 @@ struct MeetingPreview: View {
                             }
                         }
                         Text(meeting.date.formatted(date: .complete, time: .shortened)).foregroundStyle(.secondary)
+                        HStack {
+                            if editingCompany {
+                                TextField("Customer", text: $companyName).textFieldStyle(.roundedBorder).frame(width: 260)
+                                Button { onChangeCompany(); editingCompany = false } label: { Image(systemName: "checkmark.circle.fill") }
+                                Button { companyName = meeting.company; editingCompany = false } label: { Image(systemName: "xmark.circle") }
+                            } else {
+                                Text(meeting.company.isEmpty ? "No customer set" : "Customer: \(meeting.company)").foregroundStyle(.secondary)
+                                Button { companyName = meeting.company; editingCompany = true } label: { Image(systemName: "pencil") }.buttonStyle(.plain)
+                            }
+                        }
                         if meeting.isActive {
                             Text("Elapsed: \(elapsed(from: meeting.date, to: now))")
                                 .font(.title3.monospacedDigit()).foregroundStyle(.red)

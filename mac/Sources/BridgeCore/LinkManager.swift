@@ -270,9 +270,7 @@ public final class LinkManager: ObservableObject {
         guard pb.changeCount != lastPasteboardChange else { return }
         lastPasteboardChange = pb.changeCount
         guard connection != nil else { return }
-        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL], urls.contains(where: { $0.isFileURL }) {
-            for u in urls where u.isFileURL { sendFile(u) }
-        } else if let text = pb.string(forType: .string), !text.isEmpty, text != suppressClip {
+        if let text = pb.string(forType: .string), !text.isEmpty, text != suppressClip {
             send(Mappers.clipboard(text))
             pushEvent("📋 Sent clipboard")
         }
@@ -473,7 +471,6 @@ public final class LinkManager: ObservableObject {
                 self.lastPasteboardChange = pb.changeCount // don't echo back
             }
             pushEvent("📋 Clipboard: \(text)")
-            postNotification(title: "Clipboard received", body: "Click to copy it on this Mac", userInfo: ["action": "copyClipboard", "text": text])
         case MessageTypes.notifPosted:
             pushEvent("🔔 \(f("title")): \(f("text"))")
             postNotification(title: f("title"), body: f("text"))
@@ -712,13 +709,31 @@ public final class LinkManager: ObservableObject {
     }
 
     public func deleteMeeting(_ meeting: MeetingRecord) {
+        if let path = meeting.brainPath { try? brainStore.deleteNote(path: path) }
         meetingStore.deleteMeeting(meeting)
         refreshMeetings()
+        refreshBrain()
     }
 
     public func renameMeeting(_ meeting: MeetingRecord, to newName: String) {
         meetingStore.renameMeeting(meeting, to: newName)
         refreshMeetings()
+    }
+
+    public func changeMeetingCompany(_ meeting: MeetingRecord, to company: String) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let oldPath = meeting.brainPath
+            self.meetingStore.setCompany(meeting, to: company)
+            do {
+                let path = try SecondBrainExporter().transfer(meeting: meeting, client: company)
+                self.meetingStore.setBrainPath(meeting, to: path)
+                if let oldPath, oldPath != path { try? self.brainStore.deleteNote(path: oldPath) }
+                self.pushEvent("🧠 Updated meeting company: \(company)")
+            } catch {
+                self.pushEvent("🧠 Second brain company update failed: \(error.localizedDescription)")
+            }
+            self.refreshMeetings()
+        }
     }
 
     /// Recover a meeting whose chunks were saved but never transcribed.
@@ -853,6 +868,9 @@ public final class LinkManager: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let path = try SecondBrainExporter().transfer(meeting: meeting, client: client)
+                self.meetingStore.setCompany(meeting, to: client)
+                self.meetingStore.setBrainPath(meeting, to: path)
+                self.refreshMeetings()
                 self.pushEvent("🧠 Transferred \"\(meeting.title)\" to second brain: \(path)")
             } catch {
                 self.pushEvent("🧠 Second brain transfer failed: \(error.localizedDescription)")
@@ -880,7 +898,7 @@ public final class LinkManager: ObservableObject {
     public func completeFinishedMeeting(_ meeting: MeetingRecord, title: String, client: String) {
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let titled = cleanTitle.isEmpty || cleanTitle == meeting.title ? meeting : MeetingRecord(
-            id: meeting.id, title: cleanTitle, url: meeting.url, notesURL: meeting.notesURL,
+            id: meeting.id, title: cleanTitle, company: meeting.company, brainPath: meeting.brainPath, url: meeting.url, notesURL: meeting.notesURL,
             date: meeting.date, audioFiles: meeting.audioFiles, imageFiles: meeting.imageFiles,
             audioCount: meeting.audioCount, photoCount: meeting.photoCount,
             transcript: meeting.transcript, summary: meeting.summary, questions: meeting.questions,
@@ -889,6 +907,8 @@ public final class LinkManager: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let path = try SecondBrainExporter().transfer(meeting: titled, client: client)
+                self.meetingStore.setCompany(meeting, to: client)
+                self.meetingStore.setBrainPath(meeting, to: path)
                 self.pushEvent("🧠 Transferred \"\(titled.title)\" to second brain: \(path)")
             } catch {
                 self.pushEvent("🧠 Second brain transfer failed: \(error.localizedDescription)")

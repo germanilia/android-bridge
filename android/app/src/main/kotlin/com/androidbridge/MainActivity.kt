@@ -12,18 +12,22 @@ import android.provider.OpenableColumns
 import android.provider.Settings
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -39,6 +43,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
@@ -50,6 +55,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Modifier
@@ -59,7 +65,9 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -356,6 +364,11 @@ private fun HomeScreen(
         return
     }
 
+    if (selectedTab.value == 2) {
+        SecondBrainCard(link, connected, onExit = { selectedTab.value = 0 })
+        return
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         // Fixed header (does not scroll)
         Row(
@@ -379,6 +392,7 @@ private fun HomeScreen(
         TabRow(selectedTabIndex = selectedTab.value) {
             Tab(selected = selectedTab.value == 0, onClick = { selectedTab.value = 0 }, text = { Text("Bridge") })
             Tab(selected = selectedTab.value == 1, onClick = { selectedTab.value = 1 }, text = { Text("Notes") })
+            Tab(selected = selectedTab.value == 2, onClick = { selectedTab.value = 2 }, text = { Text("Brain") })
         }
 
         Column(
@@ -466,6 +480,176 @@ private fun HomeScreen(
         }
         }
         } // end scrollable content
+    }
+}
+
+@Composable
+private fun SecondBrainCard(link: LinkManager, connected: Boolean, onExit: () -> Unit) {
+    val nodes by link.brainNodes.collectAsState()
+    val path by link.selectedBrainPath.collectAsState()
+    val content by link.selectedBrainContent.collectAsState()
+    val status by link.brainStatus.collectAsState()
+    val results by link.brainSearchResults.collectAsState()
+    var editText by remember(content) { mutableStateOf(content) }
+    var query by remember { mutableStateOf("") }
+    var drawerOpen by remember { mutableStateOf(path.isBlank()) }
+    var rawMode by remember { mutableStateOf(false) }
+    var expandedFolders by remember { mutableStateOf(emptySet<String>()) }
+    val shown = if (query.isNotBlank()) {
+        results.take(40)
+    } else {
+        nodes.filter { node -> folderAncestors(node.path).all(expandedFolders::contains) }
+    }
+    val bg = Color(0xFF1E1E1E)
+    val panel = Color(0xFF262626)
+    val line = Color(0xFF3A3A3A)
+    val text = Color(0xFFE6E1F0)
+    val muted = Color(0xFFAAA3B7)
+    val purple = Color(0xFF8F7CF8)
+    val hasFolder by link.brainHasFolder.collectAsState()
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let { link.setBrainFolder(it) }
+    }
+
+    LaunchedEffect(hasFolder) { if (hasFolder) link.refreshSecondBrain() }
+
+    Box(Modifier.fillMaxSize().background(bg)) {
+        if (!hasFolder) {
+            Column(
+                Modifier.fillMaxSize().padding(24.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text("Second Brain", color = text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.size(12.dp))
+                Text(
+                    "Choose the Syncthing folder that holds your notes. Syncthing keeps it synced with your Mac and home server.",
+                    color = muted, fontSize = 14.sp, textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.size(20.dp))
+                Button(onClick = { folderPicker.launch(null) }) { Text("Choose Syncthing folder") }
+                Spacer(Modifier.size(12.dp))
+                Text("Close", color = muted, fontSize = 14.sp, modifier = Modifier.clickable(onClick = onExit).padding(8.dp))
+            }
+            return@Box
+        }
+        Column(Modifier.fillMaxSize()) {
+            Row(
+                Modifier.fillMaxWidth().background(panel).padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(if (drawerOpen) "‹" else "☰", color = text, fontSize = 28.sp, modifier = Modifier.clickable { drawerOpen = !drawerOpen }.padding(6.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(if (path.isBlank()) "Vault" else path.substringAfterLast('/').removeSuffix(".md"), color = text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (path.isNotBlank()) Text(path, color = muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (path.isNotBlank()) {
+                    Text(if (rawMode) "Preview" else "Raw", color = purple, fontSize = 14.sp, modifier = Modifier.clickable { rawMode = !rawMode }.padding(8.dp))
+                    Text("Save", color = purple, fontSize = 14.sp, modifier = Modifier.clickable { link.saveSecondBrainNode(path, editText) }.padding(8.dp))
+                }
+                Text("×", color = muted, fontSize = 26.sp, modifier = Modifier.clickable(onClick = onExit).padding(6.dp))
+            }
+
+            if (path.isBlank()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("Open the menu to choose a note", color = muted)
+                }
+            } else if (rawMode) {
+                OutlinedTextField(
+                    value = editText,
+                    onValueChange = { editText = it },
+                    modifier = Modifier.fillMaxSize().padding(12.dp),
+                    textStyle = androidx.compose.ui.text.TextStyle(color = text, fontSize = 16.sp, lineHeight = 24.sp),
+                    label = { Text("Raw markdown") },
+                )
+            } else {
+                Text(
+                    editText,
+                    color = text,
+                    fontSize = 17.sp,
+                    lineHeight = 27.sp,
+                    modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 18.dp),
+                )
+            }
+        }
+
+        if (drawerOpen) {
+            Row(Modifier.fillMaxSize()) {
+                Column(
+                    Modifier.fillMaxHeight().fillMaxWidth(0.86f).background(panel).padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Vault", color = text, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                        Text("×", color = muted, fontSize = 28.sp, modifier = Modifier.clickable { drawerOpen = false }.padding(8.dp))
+                    }
+                    Text(status, color = muted, fontSize = 12.sp)
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = { query = it; link.searchSecondBrain(it) },
+                        label = { Text("Search files") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        Chip("Refresh", true, Modifier.weight(1f)) { link.refreshSecondBrain() }
+                        Chip("New", true, Modifier.weight(1f)) {
+                            val newPath = "mobile/${System.currentTimeMillis()}.md"
+                            link.saveSecondBrainNode(newPath, "# Mobile note\n")
+                            link.selectSecondBrainNode(newPath)
+                            rawMode = true
+                            drawerOpen = false
+                        }
+                    }
+                    Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                        shown.forEach { node ->
+                            val selected = node.path == path
+                            val expanded = node.path.trimEnd('/') in expandedFolders
+                            Row(
+                                modifier = Modifier.fillMaxWidth()
+                                    .clip(RoundedCornerShape(7.dp))
+                                    .background(if (selected) purple.copy(alpha = 0.2f) else Color.Transparent)
+                                    .clickable {
+                                        if (node.isDirectory) {
+                                            val folder = node.path.trimEnd('/')
+                                            expandedFolders = if (expanded) expandedFolders - folder else expandedFolders + folder
+                                        } else {
+                                            link.selectSecondBrainNode(node.path)
+                                            rawMode = false
+                                            drawerOpen = false
+                                        }
+                                    }
+                                    .padding(start = (10 + node.depth * 14).dp, end = 10.dp, top = 11.dp, bottom = 11.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(if (node.isDirectory) if (expanded) "▾" else "▸" else "·", color = muted, fontSize = 13.sp)
+                                Spacer(Modifier.size(8.dp))
+                                Text(node.label, color = if (selected) text else muted, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+                Box(Modifier.fillMaxSize().clickable { drawerOpen = false })
+            }
+        }
+    }
+}
+
+private fun folderAncestors(path: String): List<String> {
+    val parts = path.trim('/').split('/').dropLast(1)
+    return parts.indices.map { parts.take(it + 1).joinToString("/") }
+}
+
+@Composable
+private fun ObsidianPanel(container: Color, border: Color, content: @Composable () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = container),
+        border = BorderStroke(1.dp, border),
+        shape = RoundedCornerShape(14.dp),
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) { content() }
     }
 }
 
