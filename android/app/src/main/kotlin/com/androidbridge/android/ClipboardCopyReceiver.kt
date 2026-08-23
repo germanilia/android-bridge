@@ -5,11 +5,13 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import com.androidbridge.core.LinkHolder
 
 class ClipboardCopyReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val text = intent.getStringExtra(EXTRA_TEXT) ?: return
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        LinkHolder.link?.suppressNextClipboard(text)
         clipboard.setPrimaryClip(ClipData.newPlainText("Android Bridge", text))
     }
 

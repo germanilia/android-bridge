@@ -30,21 +30,28 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -55,7 +62,9 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Modifier
@@ -65,8 +74,17 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withLink
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
@@ -81,11 +99,21 @@ import com.androidbridge.android.ScreenShareService
 import com.androidbridge.core.ConnectionState
 import com.androidbridge.core.LinkHolder
 import com.androidbridge.core.LinkManager
+import android.widget.Toast
+import com.androidbridge.core.MdBlock
+import com.androidbridge.core.NoteLink
+import com.androidbridge.core.parseMarkdown
+import com.androidbridge.core.resolveNoteLink
 import com.androidbridge.core.NearbyPeer
 import com.androidbridge.core.ReceivedFile
+import com.androidbridge.update.AndroidUpdate
+import com.androidbridge.update.AndroidUpdateCoordinator
+import com.androidbridge.update.AndroidUpdateUiState
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 
@@ -103,6 +131,8 @@ private val Slate = Color(0xFF64748B)
 
 class MainActivity : ComponentActivity() {
     private lateinit var link: LinkManager
+    private lateinit var updates: AndroidUpdateCoordinator
+    private var updateJob: Job? = null
     private val sharing = mutableStateOf(false)
     private val meetingRecording = mutableStateOf(false)
     private val meetingPaused = mutableStateOf(false)
@@ -131,13 +161,16 @@ class MainActivity : ComponentActivity() {
         handleShare(intent)
         if (intent.action == ACTION_REQUEST_SCREEN_SHARE) startScreenShare()
         lifecycleScope.launch { link.status.collect { if (it == ConnectionState.CONNECTED) flushPending() } }
+        updates = AndroidUpdateCoordinator(applicationContext)
         setContent {
+            val updateState by updates.state.collectAsState()
             MaterialTheme(colorScheme = BrandScheme) {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    HomeScreen(link, ::currentClipboard, sharing.value, meetingRecording.value, meetingPaused.value, ::startScreenShare, ::stopScreenShare, ::startMeeting, ::pauseMeeting, ::resumeMeeting, ::stopMeeting, ::takeMeetingPhoto, ::pickFile, ::openReceivedFile, ::openAccessibilitySettings, ::onClipReceived)
+                    HomeScreen(link, ::currentClipboard, sharing.value, meetingRecording.value, meetingPaused.value, ::startScreenShare, ::stopScreenShare, ::startMeeting, ::pauseMeeting, ::resumeMeeting, ::stopMeeting, ::takeMeetingPhoto, ::pickFile, ::openReceivedFile, ::openAccessibilitySettings, updateState, AndroidUpdateActions(::checkForUpdates, ::confirmUpdate, ::dismissUpdate, ::openReleasePage))
                 }
             }
         }
+        startAutomaticUpdateCheck()
     }
 
     private val captureLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -196,6 +229,23 @@ class MainActivity : ComponentActivity() {
         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
     }
 
+    private fun checkForUpdates() = startUpdateOperation { updates.check(manual = true) }
+    private fun confirmUpdate(update: AndroidUpdate) = startUpdateOperation { updates.downloadAndInstall(update) }
+    private fun dismissUpdate() {
+        updateJob?.cancel()
+        updates.cancel()
+    }
+
+    private fun startAutomaticUpdateCheck() = startUpdateOperation {
+        if (withContext(Dispatchers.IO) { updates.cleanStale() }) updates.check(manual = false)
+    }
+
+    private fun startUpdateOperation(operation: suspend () -> Unit) {
+        updateJob?.cancel()
+        updateJob = lifecycleScope.launch { operation() }
+    }
+    private fun openReleasePage(url: String) = startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+
     private fun openReceivedFile(file: ReceivedFile) {
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(file.uri, "*/*")
@@ -240,34 +290,23 @@ class MainActivity : ComponentActivity() {
         return cm.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
     }
 
-    // ---- Real shared clipboard (auto-sync when the app is in the foreground) ----
+    // Android permits clipboard observation only while this activity is foregrounded.
     private val clipboard by lazy { getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager }
-    private var suppressClip: String? = null
 
     private val clipListener = ClipboardManager.OnPrimaryClipChangedListener {
         val text = clipboard.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()
-        if (!text.isNullOrEmpty() && text != suppressClip) {
-            suppressClip = text
-            link.sendClipboard(text)
-        }
+        if (!text.isNullOrEmpty()) link.sendClipboard(text, userInitiated = false)
     }
 
     override fun onResume() {
         super.onResume()
         meetingRecording.value = MeetingRecorderService.activeMeetingId != null
         clipboard.addPrimaryClipChangedListener(clipListener)
-        // Do not auto-write peer clipboard here: it can overwrite text the user just copied on Android.
-        // Incoming clipboard can still be copied explicitly from its notification.
     }
 
     override fun onPause() {
         super.onPause()
         clipboard.removePrimaryClipChangedListener(clipListener)
-    }
-
-    /** Called when a clipboard update arrives from the peer — write it to the system clipboard. */
-    fun onClipReceived(text: String) {
-        // Keep UI state only. Writing here races with user copies and can make Push clipboard send stale peer text.
     }
 
     // ---- Share target: appear in the Android share sheet; forward shared files/text to the peer ----
@@ -343,12 +382,14 @@ private fun HomeScreen(
     onPickFile: () -> Unit,
     onOpenReceivedFile: (ReceivedFile) -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
-    onClipReceived: (String) -> Unit,
+    updateState: AndroidUpdateUiState,
+    updateActions: AndroidUpdateActions,
 ) {
     val status by link.status.collectAsState()
     val nearby by link.nearby.collectAsState()
     val paired by link.pairedFingerprints.collectAsState()
     val lastClip by link.lastClipboard.collectAsState()
+    val clipboardAutoSync by link.clipboardAutoSync.collectAsState()
     val events by link.events.collectAsState()
     val peerScreen by link.peerScreen.collectAsState()
     val receivedFiles by link.receivedFiles.collectAsState()
@@ -356,8 +397,6 @@ private fun HomeScreen(
     val activityExpanded = remember { mutableStateOf(false) }
     val macFullScreen = remember { mutableStateOf(false) }
     val selectedTab = remember { mutableStateOf(0) }
-
-    LaunchedEffect(lastClip) { lastClip?.let(onClipReceived) }
 
     if (macFullScreen.value && peerScreen != null) {
         MacScreenView(link, peerScreen!!, fullScreen = true, onFullScreen = { macFullScreen.value = false })
@@ -393,13 +432,16 @@ private fun HomeScreen(
             Tab(selected = selectedTab.value == 0, onClick = { selectedTab.value = 0 }, text = { Text("Bridge") })
             Tab(selected = selectedTab.value == 1, onClick = { selectedTab.value = 1 }, text = { Text("Notes") })
             Tab(selected = selectedTab.value == 2, onClick = { selectedTab.value = 2 }, text = { Text("Brain") })
+            Tab(selected = selectedTab.value == 3, onClick = { selectedTab.value = 3 }, text = { Text("Settings") })
         }
 
         Column(
             modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-        if (selectedTab.value == 1) {
+        if (selectedTab.value == 3) {
+            UpdateSettingsCard(updateState, updateActions)
+        } else if (selectedTab.value == 1) {
             MeetingCaptureCard(connected, meetingRecording, meetingPaused, onStartMeeting, onPauseMeeting, onResumeMeeting, onStopMeeting, onTakeMeetingPhoto)
             Text("Past meetings, transcripts, summaries, audio, photos, and Q&A are managed on the Mac Notes tab.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
         } else {
@@ -441,8 +483,16 @@ private fun HomeScreen(
         }
 
         SectionCard("Clipboard & files") {
-            Text(if (connected) "Share clipboard text or send a file — both ways." else "Pair a device to enable.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+            Text(
+                if (!connected) "Pair a device to enable clipboard and files."
+                else if (clipboardAutoSync) "Clipboard text syncs automatically while Android Bridge is open."
+                else "Clipboard sharing is manual until Auto Sync is enabled.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp,
+            )
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Auto Sync clipboard", modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurface)
+                Switch(checked = clipboardAutoSync, onCheckedChange = link::setClipboardAutoSync)
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Chip("Push clipboard", connected, Modifier.weight(1f)) { link.sendClipboard(readClipboard()) }
                 Chip("Send file", connected, Modifier.weight(1f)) { onPickFile() }
@@ -472,7 +522,7 @@ private fun HomeScreen(
             }
             if (activityExpanded.value) {
                 if (events.isEmpty()) {
-                    Text("Nothing yet — clipboard: ${lastClip ?: "—"}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                    Text(if (lastClip == null) "Nothing yet" else "Clipboard received", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
                 } else {
                     events.forEach { e -> Text(e, color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis) }
                 }
@@ -481,7 +531,79 @@ private fun HomeScreen(
         }
         } // end scrollable content
     }
+    UpdateDialogs(updateState, updateActions)
 }
+
+@Composable
+private fun UpdateSettingsCard(state: AndroidUpdateUiState, actions: AndroidUpdateActions) {
+    val checking = state is AndroidUpdateUiState.Checking
+    val downloading = state is AndroidUpdateUiState.Downloading
+    SectionCard("App updates") {
+        val context = LocalContext.current
+        val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+        Text("Installed version ${packageInfo.versionName}", color = MaterialTheme.colorScheme.onSurface)
+        Text(updateStatus(state), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+        if (checking || downloading) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                Text(if (checking) "Checking for updates" else "Downloading and verifying update")
+            }
+        }
+        if (state is AndroidUpdateUiState.Available) {
+            Text("Version ${state.update.bundle.version} is available.", color = MaterialTheme.colorScheme.onSurface)
+            OutlinedButton(onClick = { actions.openReleasePage(state.update.bundle.releasePage) }, modifier = Modifier.fillMaxWidth()) {
+                Text("Open release page")
+            }
+        }
+        Button(onClick = actions.check, enabled = !checking && !downloading, modifier = Modifier.fillMaxWidth()) {
+            Text("Check for updates")
+        }
+    }
+}
+
+@Composable
+private fun UpdateDialogs(state: AndroidUpdateUiState, actions: AndroidUpdateActions) {
+    when (state) {
+        is AndroidUpdateUiState.Available -> AlertDialog(
+            onDismissRequest = actions.dismiss,
+            title = { Text("Update available") },
+            text = { Text("Version ${state.update.bundle.version} is ready to download. Android will ask for installation approval after verification.") },
+            confirmButton = { Button(onClick = { actions.download(state.update) }) { Text("Download") } },
+            dismissButton = { OutlinedButton(onClick = actions.dismiss) { Text("Not now") } },
+        )
+        AndroidUpdateUiState.Downloading -> AlertDialog(
+            onDismissRequest = actions.dismiss,
+            title = { Text("Downloading update") },
+            text = { Text("Downloading and verifying the update.") },
+            confirmButton = {},
+            dismissButton = { OutlinedButton(onClick = actions.dismiss) { Text("Cancel") } },
+        )
+        is AndroidUpdateUiState.Error -> AlertDialog(
+            onDismissRequest = actions.dismiss,
+            title = { Text("Update unavailable") },
+            text = { Text(state.message) },
+            confirmButton = { Button(onClick = actions.dismiss) { Text("OK") } },
+        )
+        else -> Unit
+    }
+}
+
+private fun updateStatus(state: AndroidUpdateUiState): String = when (state) {
+    AndroidUpdateUiState.Idle -> "Automatic update checks run in the background."
+    is AndroidUpdateUiState.Checking -> "Checking for updates."
+    is AndroidUpdateUiState.Available -> "Update available."
+    AndroidUpdateUiState.Downloading -> "Downloading and verifying update."
+    AndroidUpdateUiState.InstallerLaunched -> "The Android installer is open."
+    is AndroidUpdateUiState.Error -> state.message
+    AndroidUpdateUiState.UpToDate -> "You have the latest stable version."
+}
+
+data class AndroidUpdateActions(
+    val check: () -> Unit,
+    val download: (AndroidUpdate) -> Unit,
+    val dismiss: () -> Unit,
+    val openReleasePage: (String) -> Unit,
+)
 
 @Composable
 private fun SecondBrainCard(link: LinkManager, connected: Boolean, onExit: () -> Unit) {
@@ -490,15 +612,25 @@ private fun SecondBrainCard(link: LinkManager, connected: Boolean, onExit: () ->
     val content by link.selectedBrainContent.collectAsState()
     val status by link.brainStatus.collectAsState()
     val results by link.brainSearchResults.collectAsState()
-    var editText by remember(content) { mutableStateOf(content) }
+    val conflicts by link.brainConflicts.collectAsState()
+    val folderName by link.brainFolderName.collectAsState()
+    var editText by remember { mutableStateOf(content) }
+    var editDirty by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var drawerOpen by remember { mutableStateOf(path.isBlank()) }
     var rawMode by remember { mutableStateOf(false) }
-    var expandedFolders by remember { mutableStateOf(emptySet<String>()) }
-    val shown = if (query.isNotBlank()) {
-        results.take(40)
-    } else {
+    var expandedJoined by rememberSaveable { mutableStateOf("") }
+    val expandedFolders = remember(expandedJoined) { expandedJoined.split('\n').filter { it.isNotEmpty() }.toSet() }
+    val treeNodes = remember(nodes, expandedFolders) {
         nodes.filter { node -> folderAncestors(node.path).all(expandedFolders::contains) }
+    }
+    val folderNoteCounts = remember(nodes) {
+        val counts = HashMap<String, Int>()
+        for (node in nodes) {
+            if (node.isDirectory) continue
+            for (ancestor in folderAncestors(node.path)) counts[ancestor] = (counts[ancestor] ?: 0) + 1
+        }
+        counts
     }
     val bg = Color(0xFF1E1E1E)
     val panel = Color(0xFF262626)
@@ -510,8 +642,34 @@ private fun SecondBrainCard(link: LinkManager, connected: Boolean, onExit: () ->
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         uri?.let { link.setBrainFolder(it) }
     }
+    val context = LocalContext.current
+    val openLink: (String) -> Unit = { target ->
+        when (val resolved = resolveNoteLink(target, path)) {
+            is NoteLink.External -> context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(resolved.url)))
+            is NoteLink.Note -> {
+                // Index notes sometimes link relative to the brain root instead of the note.
+                val candidates = listOf(resolved.path, (resolveNoteLink("/$target", path) as NoteLink.Note).path)
+                val found = candidates.firstOrNull { candidate -> nodes.any { !it.isDirectory && it.path == candidate } }
+                if (found != null) {
+                    link.selectSecondBrainNode(found)
+                    rawMode = false
+                } else {
+                    Toast.makeText(context, "Note not found: ${resolved.path}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
 
-    LaunchedEffect(hasFolder) { if (hasFolder) link.refreshSecondBrain() }
+    LaunchedEffect(path) { editDirty = false }
+    LaunchedEffect(content) { if (!editDirty) editText = content }
+    LaunchedEffect(hasFolder, editDirty) {
+        if (hasFolder) {
+            while (true) {
+                link.refreshSecondBrain(refreshSelectedContent = !editDirty)
+                delay(3_000)
+            }
+        }
+    }
 
     Box(Modifier.fillMaxSize().background(bg)) {
         if (!hasFolder) {
@@ -542,11 +700,13 @@ private fun SecondBrainCard(link: LinkManager, connected: Boolean, onExit: () ->
                 Text(if (drawerOpen) "‹" else "☰", color = text, fontSize = 28.sp, modifier = Modifier.clickable { drawerOpen = !drawerOpen }.padding(6.dp))
                 Column(Modifier.weight(1f)) {
                     Text(if (path.isBlank()) "Vault" else path.substringAfterLast('/').removeSuffix(".md"), color = text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (path.isNotBlank()) Text(path, color = muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(if (path.isBlank()) "$folderName • $status" else path, color = muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 if (path.isNotBlank()) {
                     Text(if (rawMode) "Preview" else "Raw", color = purple, fontSize = 14.sp, modifier = Modifier.clickable { rawMode = !rawMode }.padding(8.dp))
-                    Text("Save", color = purple, fontSize = 14.sp, modifier = Modifier.clickable { link.saveSecondBrainNode(path, editText) }.padding(8.dp))
+                    Text("Save", color = purple, fontSize = 14.sp, modifier = Modifier.clickable {
+                        link.saveSecondBrainNode(path, editText) { saved -> if (saved) editDirty = false }
+                    }.padding(8.dp))
                 }
                 Text("×", color = muted, fontSize = 26.sp, modifier = Modifier.clickable(onClick = onExit).padding(6.dp))
             }
@@ -558,18 +718,20 @@ private fun SecondBrainCard(link: LinkManager, connected: Boolean, onExit: () ->
             } else if (rawMode) {
                 OutlinedTextField(
                     value = editText,
-                    onValueChange = { editText = it },
+                    onValueChange = { editText = it; editDirty = true },
                     modifier = Modifier.fillMaxSize().padding(12.dp),
                     textStyle = androidx.compose.ui.text.TextStyle(color = text, fontSize = 16.sp, lineHeight = 24.sp),
                     label = { Text("Raw markdown") },
                 )
             } else {
-                Text(
-                    editText,
-                    color = text,
-                    fontSize = 17.sp,
-                    lineHeight = 27.sp,
-                    modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 18.dp),
+                MarkdownView(
+                    markdown = editText,
+                    text = text,
+                    muted = muted,
+                    codeBg = bg,
+                    accent = purple,
+                    onLink = openLink,
+                    modifier = Modifier.fillMaxSize(),
                 )
             }
         }
@@ -584,48 +746,112 @@ private fun SecondBrainCard(link: LinkManager, connected: Boolean, onExit: () ->
                         Text("Vault", color = text, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                         Text("×", color = muted, fontSize = 28.sp, modifier = Modifier.clickable { drawerOpen = false }.padding(8.dp))
                     }
-                    Text(status, color = muted, fontSize = 12.sp)
+                    Text("$folderName • $status", color = muted, fontSize = 12.sp)
+                    if (conflicts > 0) {
+                        Row(
+                            Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Color(0xFF3A2B2B)).padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                if (conflicts == 1) "1 sync conflict copy" else "$conflicts sync conflict copies",
+                                color = Color(0xFFF0B8A8), fontSize = 13.sp, modifier = Modifier.weight(1f),
+                            )
+                            Text(
+                                "Keep synced",
+                                color = purple, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.clickable { link.resolveBrainConflicts() }.padding(4.dp),
+                            )
+                        }
+                    }
                     OutlinedTextField(
                         value = query,
                         onValueChange = { query = it; link.searchSecondBrain(it) },
-                        label = { Text("Search files") },
+                        label = { Text("Search notes, #tag") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        Chip("Refresh", true, Modifier.weight(1f)) { link.refreshSecondBrain() }
+                        Chip("Refresh", true, Modifier.weight(1f)) { link.refreshSecondBrain(refreshSelectedContent = !editDirty) }
                         Chip("New", true, Modifier.weight(1f)) {
                             val newPath = "mobile/${System.currentTimeMillis()}.md"
-                            link.saveSecondBrainNode(newPath, "# Mobile note\n")
-                            link.selectSecondBrainNode(newPath)
-                            rawMode = true
-                            drawerOpen = false
+                            link.saveSecondBrainNode(newPath, "# Mobile note\n") { saved ->
+                                if (saved) {
+                                    link.selectSecondBrainNode(newPath)
+                                    rawMode = true
+                                    drawerOpen = false
+                                }
+                            }
                         }
                     }
-                    Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-                        shown.forEach { node ->
-                            val selected = node.path == path
-                            val expanded = node.path.trimEnd('/') in expandedFolders
-                            Row(
-                                modifier = Modifier.fillMaxWidth()
-                                    .clip(RoundedCornerShape(7.dp))
-                                    .background(if (selected) purple.copy(alpha = 0.2f) else Color.Transparent)
-                                    .clickable {
-                                        if (node.isDirectory) {
-                                            val folder = node.path.trimEnd('/')
-                                            expandedFolders = if (expanded) expandedFolders - folder else expandedFolders + folder
-                                        } else {
-                                            link.selectSecondBrainNode(node.path)
+                    if (query.isNotBlank()) {
+                        LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            items(results) { hit ->
+                                Column(
+                                    Modifier.fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (hit.node.path == path) purple.copy(alpha = 0.2f) else Color.Transparent)
+                                        .clickable {
+                                            link.selectSecondBrainNode(hit.node.path)
                                             rawMode = false
                                             drawerOpen = false
                                         }
+                                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                ) {
+                                    Text(hit.node.label.removeSuffix(".md"), color = text, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(hit.node.path.substringBeforeLast('/', ""), color = muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    if (hit.snippet.isNotBlank()) {
+                                        Text(hit.snippet, color = muted, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                     }
-                                    .padding(start = (10 + node.depth * 14).dp, end = 10.dp, top = 11.dp, bottom = 11.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(if (node.isDirectory) if (expanded) "▾" else "▸" else "·", color = muted, fontSize = 13.sp)
-                                Spacer(Modifier.size(8.dp))
-                                Text(node.label, color = if (selected) text else muted, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                            if (results.isEmpty()) {
+                                item { Text("No matches", color = muted, fontSize = 13.sp, modifier = Modifier.padding(10.dp)) }
+                            }
+                        }
+                    } else {
+                        LazyColumn(Modifier.weight(1f)) {
+                            items(treeNodes) { node ->
+                                val selected = node.path == path
+                                val expanded = node.path.trimEnd('/') in expandedFolders
+                                Row(
+                                    modifier = Modifier.fillMaxWidth()
+                                        .clip(RoundedCornerShape(7.dp))
+                                        .background(if (selected) purple.copy(alpha = 0.2f) else Color.Transparent)
+                                        .clickable {
+                                            if (node.isDirectory) {
+                                                val folder = node.path.trimEnd('/')
+                                                val next = if (expanded) expandedFolders - folder else expandedFolders + folder
+                                                expandedJoined = next.joinToString("\n")
+                                            } else {
+                                                link.selectSecondBrainNode(node.path)
+                                                rawMode = false
+                                                drawerOpen = false
+                                            }
+                                        }
+                                        .padding(start = (8 + node.depth * 16).dp, end = 10.dp, top = 10.dp, bottom = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    if (node.isDirectory) {
+                                        Text(if (expanded) "▾" else "▸", color = purple, fontSize = 13.sp)
+                                        Text(
+                                            node.label,
+                                            color = text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+                                        )
+                                        val count = folderNoteCounts[node.path.trimEnd('/')] ?: 0
+                                        if (count > 0) Text("$count", color = muted, fontSize = 12.sp)
+                                    } else {
+                                        Spacer(Modifier.width(13.dp))
+                                        Text(
+                                            node.label.removeSuffix(".md"),
+                                            color = if (selected) text else muted, fontSize = 15.sp,
+                                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -634,6 +860,108 @@ private fun SecondBrainCard(link: LinkManager, connected: Boolean, onExit: () ->
             }
         }
     }
+}
+
+/**
+ * Renders a note's markdown as a LazyColumn of blocks. Lazy layout means only the
+ * visible blocks are measured, so opening a very long note no longer freezes the UI
+ * the way rendering the whole note in a single Text/TextField did.
+ */
+@Composable
+private fun MarkdownView(
+    markdown: String,
+    text: Color,
+    muted: Color,
+    codeBg: Color,
+    accent: Color,
+    onLink: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val blocks = remember(markdown) { parseMarkdown(markdown) }
+    LazyColumn(
+        modifier = modifier.padding(horizontal = 20.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        items(blocks) { block -> MarkdownBlock(block, text, muted, codeBg, accent, onLink) }
+    }
+}
+
+@Composable
+private fun MarkdownBlock(block: MdBlock, text: Color, muted: Color, codeBg: Color, accent: Color, onLink: (String) -> Unit) {
+    when (block) {
+        is MdBlock.Heading -> {
+            val size = when (block.level) { 1 -> 26.sp; 2 -> 22.sp; 3 -> 19.sp; else -> 17.sp }
+            Text(inlineMarkdown(block.text, accent, onLink), color = text, fontSize = size, fontWeight = FontWeight.Bold, lineHeight = size * 1.3f)
+        }
+        is MdBlock.Paragraph -> Text(inlineMarkdown(block.text, accent, onLink), color = text, fontSize = 17.sp, lineHeight = 27.sp)
+        is MdBlock.ListItem -> Row(
+            modifier = Modifier.padding(start = (block.indent * 8).dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("•", color = muted, fontSize = 17.sp, lineHeight = 27.sp)
+            Text(inlineMarkdown(block.text, accent, onLink), color = text, fontSize = 17.sp, lineHeight = 27.sp)
+        }
+        is MdBlock.Quote -> Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Box(Modifier.width(3.dp).heightIn(min = 22.dp).background(accent))
+            Text(inlineMarkdown(block.text, accent, onLink), color = muted, fontSize = 17.sp, lineHeight = 27.sp, fontStyle = FontStyle.Italic)
+        }
+        is MdBlock.Code -> Text(
+            block.text,
+            color = text,
+            fontSize = 14.sp,
+            lineHeight = 21.sp,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(codeBg).padding(12.dp),
+        )
+        is MdBlock.Table -> Column(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(codeBg).padding(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            block.rows.forEachIndexed { index, row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    row.forEach { cell ->
+                        Text(
+                            inlineMarkdown(cell, accent, onLink),
+                            color = text,
+                            fontSize = 14.sp,
+                            fontWeight = if (index == 0) FontWeight.Bold else FontWeight.Normal,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+            }
+        }
+        is MdBlock.Divider -> Box(Modifier.fillMaxWidth().padding(vertical = 4.dp).background(muted.copy(alpha = 0.3f)).height(1.dp))
+    }
+}
+
+private val INLINE_MD = Regex("\\*\\*(.+?)\\*\\*|__(.+?)__|`([^`]+)`|\\*(.+?)\\*|_(.+?)_|\\[(.+?)\\]\\(([^)]+)\\)")
+
+/** Styles a single line of markdown inline spans (bold, italic, code, tappable links). */
+private fun inlineMarkdown(src: String, accent: Color, onLink: (String) -> Unit): AnnotatedString = buildAnnotatedString {
+    var last = 0
+    for (m in INLINE_MD.findAll(src)) {
+        if (m.range.first > last) append(src.substring(last, m.range.first))
+        val g = m.groupValues
+        when {
+            g[1].isNotEmpty() -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(g[1]) }
+            g[2].isNotEmpty() -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(g[2]) }
+            g[3].isNotEmpty() -> withStyle(SpanStyle(fontFamily = FontFamily.Monospace)) { append(g[3]) }
+            g[4].isNotEmpty() -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(g[4]) }
+            g[5].isNotEmpty() -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(g[5]) }
+            g[6].isNotEmpty() -> {
+                val target = g[7]
+                withLink(
+                    LinkAnnotation.Clickable(
+                        tag = target,
+                        styles = TextLinkStyles(style = SpanStyle(color = accent, textDecoration = TextDecoration.Underline)),
+                    ) { onLink(target) },
+                ) { append(g[6]) }
+            }
+        }
+        last = m.range.last + 1
+    }
+    if (last < src.length) append(src.substring(last))
 }
 
 private fun folderAncestors(path: String): List<String> {

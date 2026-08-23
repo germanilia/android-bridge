@@ -7,7 +7,8 @@ import BridgeCore
 // Pure-AppKit menu-bar app (reliable across ad-hoc builds, unlike SwiftUI MenuBarExtra). A status-bar
 // item opens AppKit-hosted SwiftUI windows; inbound events show a custom banner (works without the
 // notification entitlement that ad-hoc apps lack).
-final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate, NSWindowDelegate, NSMenuItemValidation {
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUserNotificationCenterDelegate, NSWindowDelegate, NSMenuItemValidation {
 
     /// Phone-dependent menu items are greyed out while the phone is not connected.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -22,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var toastPanels: [NSPanel] = []
     private var callPanel: NSPanel?
     private var cancellables = Set<AnyCancellable>()
+    private let updates = MacUpdateController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
@@ -91,6 +93,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }.store(in: &cancellables)
 
         openDashboard()
+        updates.startAutomaticCheck()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        updates.cleanup()
     }
 
     private func appMenuItem(_ title: String, action: Selector, key: String) -> NSMenuItem {
@@ -139,7 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             w.isReleasedWhenClosed = false
             w.center()
             w.delegate = self
-            w.contentView = NSHostingView(rootView: DashboardView(link: LinkManager.shared))
+            w.contentView = NSHostingView(rootView: DashboardView(link: LinkManager.shared, updates: updates))
             window = w
             AppUIState.shared.window = w
         }
@@ -205,6 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func showToast(title: String, body: String, userInfo: [AnyHashable: Any] = [:]) {
         diag("TOAST_FIRED title=\(title)")
+        let copyText = userInfo["path"] as? String ?? body
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 90),
                             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.level = .floating
@@ -214,7 +222,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         panel.ignoresMouseEvents = false
         panel.contentView = NSHostingView(rootView: ToastView(title: title, message: body) {
             NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(body, forType: .string)
+            NSPasteboard.general.setString(copyText, forType: .string)
         }.onTapGesture {
             LinkManager.shared.handleNotificationClick(userInfo)
             panel.orderOut(nil)
@@ -325,7 +333,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 }
 
 let app = NSApplication.shared
-let delegate = AppDelegate()
+let delegate = MainActor.assumeIsolated { AppDelegate() }
 app.delegate = delegate
 app.setActivationPolicy(.accessory)
 app.run()

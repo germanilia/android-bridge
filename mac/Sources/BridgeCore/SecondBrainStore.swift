@@ -24,15 +24,34 @@ public struct BrainEdge: Identifiable, Equatable {
 
 public final class SecondBrainStore {
     private let fm = FileManager.default
-    private let scriptURL: URL
-    public let rootURL: URL
 
-    public init() {
+    public init() {}
+
+    private var scriptURL: URL {
         let home = fm.homeDirectoryForCurrentUser
-        scriptURL = home.appendingPathComponent(".agents/skills/second-brain/scripts/brain.py")
+        let configured = UserDefaults.standard.string(forKey: "pi.secondBrainSkill")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let root = configured?.isEmpty == false ? configured! : home.appendingPathComponent(".agents/skills/second-brain").path
+        return URL(fileURLWithPath: root).appendingPathComponent("scripts/brain.py")
+    }
+
+    public var rootURL: URL {
+        let home = fm.homeDirectoryForCurrentUser
         let configured = UserDefaults.standard.string(forKey: "secondBrain.root")?.trimmingCharacters(in: .whitespacesAndNewlines)
         let env = ProcessInfo.processInfo.environment["BRAIN_ROOT"]?.trimmingCharacters(in: .whitespaces)
-        rootURL = URL(fileURLWithPath: configured?.isEmpty == false ? configured! : (env?.isEmpty == false ? env! : home.appendingPathComponent("second_brain").path))
+        let path = configured?.isEmpty == false ? configured! : (env?.isEmpty == false ? env! : home.appendingPathComponent("second_brain").path)
+        return URL(fileURLWithPath: path)
+    }
+
+    public func revision() -> String {
+        let root = rootURL
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey]
+        let files = fm.enumerator(at: root, includingPropertiesForKeys: keys)?.compactMap { $0 as? URL } ?? []
+        let metadata = files.compactMap { url -> String? in
+            guard url.pathExtension.lowercased() == "md", let values = try? url.resourceValues(forKeys: Set(keys)), values.isRegularFile == true else { return nil }
+            let path = String(url.path.dropFirst(root.path.count))
+            return "\(path)|\(values.fileSize ?? 0)|\(values.contentModificationDate?.timeIntervalSince1970 ?? 0)"
+        }
+        return ([root.path] + metadata.sorted()).joined(separator: "\n")
     }
 
     public func tree() throws -> [BrainNode] {

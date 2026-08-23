@@ -1,0 +1,1 @@
+identifier "com.androidbridge.mac" and certificate leaf = H"ef2fb966bb80189b6e12ef4a9111601f4d8466ec"

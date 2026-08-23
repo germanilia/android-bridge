@@ -4,6 +4,36 @@ import Foundation
 @testable import BridgeCore
 import DeviceLinkProtocol
 
+final class SecondBrainStoreRefreshTests: XCTestCase {
+    func testConfiguredRootChangesWithoutRecreatingStore() {
+        let first = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let second = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { UserDefaults.standard.removeObject(forKey: "secondBrain.root") }
+        UserDefaults.standard.set(first.path, forKey: "secondBrain.root")
+        let store = SecondBrainStore()
+
+        UserDefaults.standard.set(second.path, forKey: "secondBrain.root")
+
+        XCTAssertEqual(store.rootURL.standardizedFileURL, second.standardizedFileURL)
+    }
+
+    func testRevisionChangesWhenMarkdownTreeChanges() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            UserDefaults.standard.removeObject(forKey: "secondBrain.root")
+        }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        UserDefaults.standard.set(root.path, forKey: "secondBrain.root")
+        let store = SecondBrainStore()
+        let initial = store.revision()
+
+        try "# New note".write(to: root.appendingPathComponent("new.md"), atomically: true, encoding: .utf8)
+
+        XCTAssertNotEqual(store.revision(), initial)
+    }
+}
+
 final class MessageRouterTests: XCTestCase {
     func testRoutesValidMessage() {
         let router = MessageRouter()
@@ -93,6 +123,39 @@ struct Blob: Arbitrary {
     }
 }
 
+struct CustomerScenario: Arbitrary {
+    let seed: Int
+    let customer: String
+    let eventTitle: String
+    let domain: String
+
+    static var arbitrary: Gen<CustomerScenario> {
+        Int.arbitrary.map { value in
+            let token = String(value.magnitude % 10_000)
+            return CustomerScenario(seed: value, customer: "Customer \(token)", eventTitle: "Weekly \(token)", domain: "customer\(token).example")
+        }
+    }
+
+    static func shrink(_ value: CustomerScenario) -> [CustomerScenario] {
+        Int.shrink(value.seed).map { seed in
+            let token = String(seed.magnitude % 10_000)
+            return CustomerScenario(seed: seed, customer: "Customer \(token)", eventTitle: "Weekly \(token)", domain: "customer\(token).example")
+        }
+    }
+}
+
+struct CalendarIntervals: Arbitrary {
+    let values: [Int]
+
+    static var arbitrary: Gen<CalendarIntervals> {
+        [Int].arbitrary.map(CalendarIntervals.init)
+    }
+
+    static func shrink(_ value: CalendarIntervals) -> [CalendarIntervals] {
+        [Int].shrink(value.values).map(CalendarIntervals.init)
+    }
+}
+
 final class MeetingCaptureTests: XCTestCase {
     func testNotesPlacesPhotoBeforeNearestLaterSegment() {
         let segments = [TranscriptSegment(speaker: "Speaker 1", startMs: 1000, endMs: 2000, text: "hello")]
@@ -100,6 +163,100 @@ final class MeetingCaptureTests: XCTestCase {
         let md = NotesBuilder().build(meetingId: "m1", segments: segments, photos: photos)
         XCTAssertTrue(md.contains("![Photo at 500ms](media/photo-p1.jpg)"))
         XCTAssertTrue(md.contains("**Speaker 1** [1000ms]: hello"))
+    }
+
+    func testBackfillGeneratesOnlyMissingSummary() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        store.appendTranscript(meetingId: "missing", segment: TranscriptSegment(speaker: "A", startMs: 0, endMs: 1, text: "Needs summary"))
+        store.appendTranscript(meetingId: "existing", segment: TranscriptSegment(speaker: "B", startMs: 0, endMs: 1, text: "Keep summary"))
+        let existingSummary = store.meetingDir("existing").appendingPathComponent("summary-Original-Detailed.md")
+        try "existing summary".write(to: existingSummary, atomically: true, encoding: .utf8)
+        _ = store.backfillMissingSummaries { _ in "generated" }
+        _ = store.backfillMissingSummaries { _ in "replacement" }
+
+        let meetings = Dictionary(uniqueKeysWithValues: store.listMeetings().map { ($0.id, $0) })
+        XCTAssertEqual(meetings["missing"]?.summary, "generated")
+        XCTAssertEqual(try String(contentsOf: existingSummary, encoding: .utf8), "existing summary")
+    }
+
+    func testBackfillMarksMissingSummaryAsNeedsAttention() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        store.appendTranscript(meetingId: "failed", segment: TranscriptSegment(speaker: "A", startMs: 0, endMs: 1, text: "Provider quota failed"))
+
+        let result = store.backfillMissingSummaries(summarize: { _ in nil }, makeTitle: { _ in nil })
+
+        XCTAssertEqual(result.attempted, 1)
+        XCTAssertEqual(result.completed, 0)
+        XCTAssertEqual(store.listMeetings().first?.processingState, .needsAttention)
+    }
+
+    func testBackfillRegeneratesWhenOnlyAnotherLanguageSummaryExists() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        store.appendTranscript(meetingId: "translated", segment: TranscriptSegment(speaker: "A", startMs: 0, endMs: 1, text: "Some talk"))
+        let otherLanguage = store.meetingDir("translated").appendingPathComponent("summary-English-Short.md")
+        try "old english short".write(to: otherLanguage, atomically: true, encoding: .utf8)
+
+        let result = store.backfillMissingSummaries { _ in "fresh preferred" }
+
+        XCTAssertEqual(result.completed, 1)
+        let preferred = store.meetingDir("translated").appendingPathComponent("summary-Original-Detailed.md")
+        XCTAssertEqual(try String(contentsOf: preferred, encoding: .utf8), "fresh preferred")
+    }
+
+    func testBackfillGivesGenericMeetingsARealTitle() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let uuidId = UUID().uuidString  // UUID folder names display as "Live Meeting"
+        store.appendTranscript(meetingId: uuidId, segment: TranscriptSegment(speaker: "A", startMs: 0, endMs: 1, text: "Planning the pilot"))
+
+        _ = store.backfillMissingSummaries(summarize: { _ in "sum" }, makeTitle: { _ in " \"Pilot Planning\" " })
+
+        let titles = store.listMeetings().map(\.title)
+        XCTAssertEqual(titles, ["Pilot Planning"])
+    }
+
+    func testCompanyNameIsCaseInsensitiveAgainstExistingCluster() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            UserDefaults.standard.removeObject(forKey: "secondBrain.root")
+        }
+        UserDefaults.standard.set(root.path, forKey: "secondBrain.root")
+        let cluster = root.appendingPathComponent("work/sela/meetings/acme-corp")
+        try FileManager.default.createDirectory(at: cluster, withIntermediateDirectories: true)
+        try "# Acme Corp\n\nMeetings with Acme Corp.".write(to: cluster.appendingPathComponent("index.md"), atomically: true, encoding: .utf8)
+
+        let exporter = SecondBrainExporter()
+        XCTAssertEqual(exporter.canonicalClientName("ACME corp"), "Acme Corp")
+        XCTAssertEqual(exporter.canonicalClientName("acme-CORP"), "Acme Corp")
+        XCTAssertEqual(exporter.canonicalClientName("New Client"), "New Client")
+    }
+}
+
+final class PiInvocationTests: XCTestCase {
+    func testPrintArgumentsDisableExtensionsAndTools() {
+        let arguments = PiInvocation.arguments(model: "zai/glm-5.2", prompt: "hello")
+        XCTAssertTrue(arguments.contains("--no-extensions"))
+        XCTAssertTrue(arguments.contains("--no-tools"))
+        XCTAssertFalse(arguments.contains("--skill"))
+    }
+}
+
+final class PiModelCatalogTests: XCTestCase {
+    func testParsesProviderAndModelFromPiListModels() {
+        let output = """
+        provider      model                context  max-out  thinking  images
+        openai-codex  gpt-5.4              272K     128K     yes       yes
+        huggingface   openai/gpt-oss-120b  131.1K   32.8K    yes       no
+        """
+        XCTAssertEqual(PiModelCatalog.parse(output), ["openai-codex/gpt-5.4", "huggingface/openai/gpt-oss-120b"])
     }
 }
 
@@ -195,6 +352,207 @@ final class SetupCatalogTests: XCTestCase {
 
         let detector = SetupDetector(applicationSupport: root.appendingPathComponent("support"), bundledWhisperPython: python)
         XCTAssertEqual(detector.state(for: .whisper), .installed(python.path))
+    }
+}
+
+final class MeetingCustomerAutomationTests: XCTestCase {
+    func testCatalogDeduplicatesMeetingsBrainAndCreatedCustomers() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let data = root.appendingPathComponent("customer-automation.json")
+        let brain = root.appendingPathComponent("brain")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let acme = brain.appendingPathComponent("work/sela/meetings/acme")
+        try FileManager.default.createDirectory(at: acme, withIntermediateDirectories: true)
+        try "# Acme".write(to: acme.appendingPathComponent("index.md"), atomically: true, encoding: .utf8)
+        let store = MeetingCustomerStore(dataURL: data, brainRootURL: brain)
+
+        XCTAssertEqual(try store.addCustomer("  Beta Ltd  "), "Beta Ltd")
+        XCTAssertEqual(try store.customers(meetingNames: ["ACME", "Gamma"]), ["Acme", "Beta Ltd", "Gamma"])
+        XCTAssertEqual(try store.customers(meetingNames: ["beta ltd"]), ["Acme", "Beta Ltd"])
+    }
+
+    func testLearnedAssociationPersistsAndResolvesFutureEvent() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let data = root.appendingPathComponent("customer-automation.json")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingCustomerStore(dataURL: data, brainRootURL: root.appendingPathComponent("brain"))
+        let first = event(title: "Acme weekly", domains: ["acme.example"])
+        try store.remember(event: first, customer: "Acme")
+        let reloaded = MeetingCustomerStore(dataURL: data, brainRootURL: root.appendingPathComponent("brain"))
+        let future = event(id: "future", title: "Acme Weekly", domains: ["acme.example"])
+
+        XCTAssertEqual(
+            MeetingCustomerMatcher.resolve(event: future, customers: ["Acme"], associations: try reloaded.associations()),
+            "Acme"
+        )
+    }
+
+    func testConflictingLearnedSignalsNeverAutoSelect() {
+        let event = event(title: "Weekly sync", domains: ["shared.example"])
+        let associations = [
+            MeetingCustomerAssociation(customer: "Acme", calendarIdentifier: "work", eventTitle: "Weekly sync", externalDomains: ["shared.example"]),
+            MeetingCustomerAssociation(customer: "Beta", calendarIdentifier: "other", eventTitle: "Another", externalDomains: ["shared.example"]),
+        ]
+
+        XCTAssertNil(MeetingCustomerMatcher.resolve(event: event, customers: ["Acme", "Beta"], associations: associations))
+    }
+
+    func testAssociationCanBeChangedAndForgotten() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let data = root.appendingPathComponent("customer-automation.json")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingCustomerStore(dataURL: data, brainRootURL: root.appendingPathComponent("brain"))
+        let calendarEvent = event(title: "Review", domains: ["review.example"])
+        try store.remember(event: calendarEvent, customer: "Acme")
+        let association = try XCTUnwrap(store.associations().first)
+
+        try store.changeAssociation(id: association.id, customer: "Beta")
+        XCTAssertEqual(try store.associations().first?.customer, "Beta")
+        try store.forgetAssociation(id: association.id)
+        XCTAssertTrue(try store.associations().isEmpty)
+    }
+
+    func testAssociationJSONRoundTripProperty() {
+        property("PBT-02: learned customer associations survive persistence") <- forAll { (scenario: CustomerScenario) in
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let data = root.appendingPathComponent("customer-automation.json")
+            let event = self.event(title: scenario.eventTitle, domains: [scenario.domain])
+            do {
+                try MeetingCustomerStore(dataURL: data, brainRootURL: root).remember(event: event, customer: scenario.customer)
+                let reloaded = MeetingCustomerStore(dataURL: data, brainRootURL: root)
+                return MeetingCustomerMatcher.resolve(
+                    event: event,
+                    customers: [scenario.customer],
+                    associations: try reloaded.associations()
+                ) == scenario.customer
+            } catch {
+                return false
+            }
+        }
+    }
+
+    func testOldCalendarSnapshotWithoutCalendarIdentityStillDecodes() throws {
+        let json = Data(#"{"id":"old","title":"Old event","start":0,"end":60,"calendarTitle":"Work","participants":[]}"#.utf8)
+        let event = try JSONDecoder().decode(MeetingCalendarEvent.self, from: json)
+
+        XCTAssertEqual(event.id, "old")
+        XCTAssertNil(event.calendarIdentifier)
+        XCTAssertNil(event.calendarSource)
+    }
+
+    private func event(id: String = "event", title: String, domains: [String]) -> MeetingCalendarEvent {
+        MeetingCalendarEvent(
+            id: id,
+            title: title,
+            start: Date(timeIntervalSince1970: 100),
+            end: Date(timeIntervalSince1970: 200),
+            calendarTitle: "Work",
+            calendarIdentifier: "work",
+            calendarSource: "Google",
+            organizer: nil,
+            participants: domains.map { MeetingCalendarParticipant(name: "Guest", email: "guest@\($0)", isCurrentUser: false) },
+            meetingURL: nil,
+            location: nil
+        )
+    }
+}
+
+final class MeetingCalendarTests: XCTestCase {
+    private let meetingStart = Date(timeIntervalSince1970: 100)
+    private let meetingEnd = Date(timeIntervalSince1970: 200)
+
+    func testReturnsOnlyOverlappingEventsInDeterministicOrder() {
+        let events = [
+            event("late", start: 180, end: 240),
+            event("before", start: 20, end: 100),
+            event("closest", start: 110, end: 150),
+            event("after", start: 200, end: 260),
+        ]
+
+        let matches = MeetingCalendarMatcher.overlapping(events, meetingStart: meetingStart, meetingEnd: meetingEnd)
+
+        XCTAssertEqual(matches.map(\.id), ["closest", "late"])
+    }
+
+    func testToleranceIncludesOneNearBoundaryEventAndOrdersByActualOverlap() {
+        let events = [
+            event("near", start: 205, end: 240),
+            event("full", start: 90, end: 210),
+        ]
+
+        let matches = MeetingCalendarMatcher.overlapping(events, meetingStart: meetingStart, meetingEnd: meetingEnd, tolerance: 15)
+
+        XCTAssertEqual(matches.map(\.id), ["full", "near"])
+    }
+
+    func testSuggestsOneExternalCompanyAndRejectsAmbiguity() {
+        let participants = [
+            MeetingCalendarParticipant(name: "Me", email: "me@sela.co", isCurrentUser: true),
+            MeetingCalendarParticipant(name: "A", email: "a@acme-corp.com", isCurrentUser: false),
+            MeetingCalendarParticipant(name: "B", email: "b@acme-corp.com", isCurrentUser: false),
+        ]
+        XCTAssertEqual(MeetingCalendarMatcher.suggestedCustomer(from: participants), "Acme Corp")
+
+        let ambiguous = participants + [MeetingCalendarParticipant(name: "C", email: "c@other.io", isCurrentUser: false)]
+        XCTAssertNil(MeetingCalendarMatcher.suggestedCustomer(from: ambiguous))
+    }
+
+    func testIgnoresGenericEmailProviders() {
+        let participants = [
+            MeetingCalendarParticipant(name: "A", email: "a@gmail.com", isCurrentUser: false),
+            MeetingCalendarParticipant(name: "B", email: "b@outlook.com", isCurrentUser: false),
+        ]
+        XCTAssertNil(MeetingCalendarMatcher.suggestedCustomer(from: participants))
+    }
+
+    func testPersistsStateAndRecoversInterruptedFinalization() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        store.markStarted(meetingId: "m1", startedAtMs: 100_000)
+        store.markEnded(meetingId: "m1", endedAtMs: 200_000)
+        store.setProcessingState(meetingId: "m1", state: .finalizing)
+        let original = try XCTUnwrap(store.listMeetings().first)
+        let selectedEvent = event("selected", start: 110, end: 150)
+        XCTAssertTrue(store.setCalendarEvent(selectedEvent, for: original))
+        XCTAssertEqual(store.listMeetings().first?.processingState, .finalizing)
+        XCTAssertEqual(store.listMeetings().first?.endDate, Date(timeIntervalSince1970: 200))
+        XCTAssertEqual(store.listMeetings().first?.calendarEvent, selectedEvent)
+
+        store.recoverInterruptedProcessing()
+
+        XCTAssertEqual(store.listMeetings().first?.processingState, .needsAttention)
+    }
+
+    func testOverlapMatchingInvariant() {
+        property("PBT-03: calendar matches always overlap and ignore input order") <- forAll { (input: CalendarIntervals) in
+            let events = input.values.enumerated().map { index, value in
+                let start = Double(value % 300)
+                let duration = Double(abs(value % 60) + 1)
+                return self.event("e-\(index)", start: start, end: start + duration)
+            }
+            let tolerance: TimeInterval = 15
+            let forward = MeetingCalendarMatcher.overlapping(events, meetingStart: self.meetingStart, meetingEnd: self.meetingEnd, tolerance: tolerance)
+            let reverse = MeetingCalendarMatcher.overlapping(events.reversed(), meetingStart: self.meetingStart, meetingEnd: self.meetingEnd, tolerance: tolerance)
+            return forward == reverse && forward.allSatisfy {
+                $0.start < self.meetingEnd.addingTimeInterval(tolerance) && $0.end > self.meetingStart.addingTimeInterval(-tolerance)
+            }
+        }
+    }
+
+    private func event(_ id: String, start: TimeInterval, end: TimeInterval) -> MeetingCalendarEvent {
+        MeetingCalendarEvent(
+            id: id,
+            title: id,
+            start: Date(timeIntervalSince1970: start),
+            end: Date(timeIntervalSince1970: end),
+            calendarTitle: "Work",
+            organizer: nil,
+            participants: [],
+            meetingURL: nil,
+            location: nil
+        )
     }
 }
 

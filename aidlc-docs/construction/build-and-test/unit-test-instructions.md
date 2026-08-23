@@ -29,7 +29,14 @@ XCTest + SwiftCheck tests.
   `PropertyHarness` (SplitMix64 `PRNG` + `PropertyRunner`) kept for machines without Xcode. It was the
   primary path before Xcode was installed; now `swift test` (SwiftCheck + XCTest) is.
 
-## 3. PBT compliance (Partial mode)
+## 3. Meeting Calendar tests
+
+- **Run:** `cd mac && swift test`.
+- `MeetingCalendarTests` covers strict overlap boundaries, deterministic candidate order, one-company inference, generic-domain rejection, state/end-time/calendar snapshot persistence, and interrupted-finalization recovery.
+- SwiftCheck property `PBT-03: calendar matches always overlap and ignore input order` runs 100 cases using the shrinkable `CalendarIntervals` domain generator.
+- Current Mac result: 30 XCTest cases pass, including both SwiftCheck properties at 100 cases each.
+
+## 4. PBT compliance (Partial mode)
 | Rule | Where satisfied |
 |------|-----------------|
 | PBT-02 round-trip | Kotlin `ProtocolPropertyTest`, Swift `ProtocolPropertyTests` (SwiftCheck) |
@@ -43,3 +50,26 @@ XCTest + SwiftCheck tests.
   24 Android unit tests (incl. in-process mTLS handshake + pinned-peer rejection); Mac core XCTest+SwiftCheck.
 - **Not unit-tested here:** device/hardware-bound behavior (telephony, screen capture, Bluetooth HFP,
   NSD discovery, live two-device mTLS link) — integration/manual on real hardware, not unit-testable.
+
+## 5. Clipboard and Second Brain reliability tests
+
+- `cd android && ./gradlew :app:testDebugUnitTest --no-daemon`: 46 tests passed.
+- `ClipboardSyncTest` includes generated mode/user-action inputs and verifies `AUTO || userInitiated`.
+- `cd mac && swift test`: 33 XCTest passed plus two 100-case SwiftCheck properties.
+- `SecondBrainStoreRefreshTests` verifies live configured-root changes and Markdown-tree revision changes.
+- Full protocol tests remain green in Kotlin and Swift, including control-message round trips and oversize rejection.
+
+## 6. Meeting customer automation tests
+
+- `cd mac && swift test`: 40 XCTest passed.
+- `MeetingCustomerAutomationTests` covers catalog seeding/deduplication, learned match persistence, ambiguity, correction/forget, and old calendar snapshot decoding.
+- SwiftCheck PBT-02 generates customer/event/domain scenarios and verifies learned association JSON round trips across 100 cases.
+- SwiftCheck PBT-03 generates event intervals and verifies padded matching invariants and input-order independence across 100 cases.
+- `MeetingCalendarTests` pins 15-minute boundary tolerance and strongest-overlap ordering.
+
+## 7. Direct distribution updater tests
+
+- `python3 -m unittest scripts/test_release.py`: version, names, manifest, aliases, checksums, SBOM shape, and workflow policy.
+- `cd mac && swift test`: strict stable metadata, semantic comparison, bounded DMG integrity, owned-path cleanup, and rejection tests in `MacUpdateTests`.
+- `cd android && ./gradlew :app:testDebugUnitTest --no-daemon`: strict stable metadata, version-code comparison, bounded APK integrity, cancellation/cleanup, and malformed-input tests in `AndroidUpdateTest`.
+- Platform compile checks prove the native Mac controller and Android PackageManager/FileProvider adapters integrate with existing apps.

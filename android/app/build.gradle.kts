@@ -1,8 +1,41 @@
+import java.io.File
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.serialization")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+val versionText = File(rootProject.projectDir, "../VERSION").readText().let { value ->
+    if (!value.endsWith("\n") || value.count { it == '\n' } != 1) {
+        throw GradleException("VERSION must contain exactly one newline-terminated version.")
+    }
+    value.dropLast(1)
+}
+val versionMatch = Regex("(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)").matchEntire(versionText)
+    ?: throw GradleException("VERSION must be MAJOR.MINOR.PATCH with strict decimal components.")
+val versionParts = versionMatch.groupValues.drop(1).map { component ->
+    component.toLongOrNull() ?: throw GradleException("VERSION component is out of range.")
+}
+if (versionParts[0] > 2_100 || versionParts[1] > 999 || versionParts[2] > 999) {
+    throw GradleException("VERSION components derive an Android version code outside 1...2100000000.")
+}
+val versionCodeValue = versionParts[0] * 1_000_000L + versionParts[1] * 1_000L + versionParts[2]
+if (versionCodeValue !in 1L..2_100_000_000L) {
+    throw GradleException("VERSION derives an Android version code outside 1...2100000000.")
+}
+val releaseSigningVariables = listOf(
+    "ANDROID_RELEASE_STORE_FILE",
+    "ANDROID_RELEASE_STORE_PASSWORD",
+    "ANDROID_RELEASE_KEY_ALIAS",
+    "ANDROID_RELEASE_KEY_PASSWORD",
+)
+val releaseSigningValues = releaseSigningVariables.associateWith { providers.environmentVariable(it).orNull }
+val releaseRequested = gradle.startParameter.taskNames.any { it.contains("release", ignoreCase = true) }
+val missingReleaseSigningVariables = releaseSigningVariables.filter { releaseSigningValues[it].isNullOrEmpty() }
+if (releaseRequested && missingReleaseSigningVariables.isNotEmpty()) {
+    throw GradleException("Release signing requires: ${missingReleaseSigningVariables.joinToString(", ")}")
 }
 
 android {
@@ -13,8 +46,8 @@ android {
         applicationId = "com.androidbridge"
         minSdk = 33
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = versionCodeValue.toInt()
+        versionName = versionText
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -33,9 +66,21 @@ android {
         }
     }
 
+    if (missingReleaseSigningVariables.isEmpty()) {
+        signingConfigs.create("release") {
+            storeFile = file(requireNotNull(releaseSigningValues["ANDROID_RELEASE_STORE_FILE"]))
+            storePassword = requireNotNull(releaseSigningValues["ANDROID_RELEASE_STORE_PASSWORD"])
+            keyAlias = requireNotNull(releaseSigningValues["ANDROID_RELEASE_KEY_ALIAS"])
+            keyPassword = requireNotNull(releaseSigningValues["ANDROID_RELEASE_KEY_PASSWORD"])
+        }
+    }
+
     buildTypes {
         getByName("release") {
             isMinifyEnabled = false
+            if (missingReleaseSigningVariables.isEmpty()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

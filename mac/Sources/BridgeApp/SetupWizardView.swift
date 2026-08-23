@@ -219,8 +219,8 @@ struct SetupWizardView: View {
         VStack(spacing: 18) {
             Text("Install Android Bridge on your phone").font(.title2).bold()
             if let image = qrImage(apkURL) { Image(nsImage: image).interpolation(.none).resizable().frame(width: 220, height: 220) }
-            Link("Download AndroidBridge-latest.apk", destination: apkURL)
-            Text("On Android, allow ‘Install unknown apps’ for your browser or file manager, install the debug-signed APK, grant the requested permissions, then open it on the same Wi-Fi network.")
+            Link("Download AndroidBridge-android.apk", destination: apkURL)
+            Text("Optional Android 13+ companion: allow ‘Install unknown apps’ for your browser or file manager, install the release-signed APK, grant the requested permissions, then open it on the same Wi-Fi network.")
                 .multilineTextAlignment(.center).foregroundStyle(.secondary).frame(maxWidth: 580)
             Label(link.status == .connected ? "Phone connected" : "Waiting for phone connection", systemImage: link.status == .connected ? "checkmark.circle.fill" : "wifi")
                 .foregroundStyle(link.status == .connected ? .green : .secondary)
@@ -240,7 +240,7 @@ struct SetupWizardView: View {
         }.padding(30).frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var apkURL: URL { URL(string: "https://github.com/germanilia/android-bridge/releases/download/latest-build/AndroidBridge-latest.apk")! }
+    private var apkURL: URL { URL(string: "https://github.com/germanilia/android-bridge/releases/latest/download/AndroidBridge-android.apk")! }
 
     private func qrImage(_ url: URL) -> NSImage? {
         let filter = CIFilter.qrCodeGenerator()

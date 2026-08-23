@@ -31,6 +31,7 @@ public final class LinkManager: ObservableObject {
     @Published public private(set) var nearby: [NearbyPeer] = []
     @Published public private(set) var pairedFingerprints: Set<String> = []
     @Published public private(set) var lastClipboard: String?
+    @Published public private(set) var clipboardAutoSync = UserDefaults.standard.bool(forKey: "clipboard.autoSync")
     @Published public private(set) var events: [String] = []
     @Published public private(set) var screenImage: NSImage?
     @Published public private(set) var screenSharing = false
@@ -40,6 +41,8 @@ public final class LinkManager: ObservableObject {
     @Published public private(set) var receivedFiles: [ReceivedFile] = []
     @Published public private(set) var meetings: [MeetingRecord] = []
     @Published public private(set) var regeneratingSummaryIds: Set<String> = []
+    @Published public private(set) var summaryBackfillStatus: String?
+    @Published public private(set) var summaryBackfillRunning = false
     @Published public private(set) var brainTransferIds: Set<String> = []
     @Published public private(set) var brainNodes: [BrainNode] = []
     @Published public private(set) var brainEdges: [BrainEdge] = []
@@ -47,15 +50,22 @@ public final class LinkManager: ObservableObject {
     @Published public private(set) var selectedBrainContent = ""
     @Published public private(set) var brainSearchResults: [BrainSearchResult] = []
     @Published public private(set) var brainChat = ""
+    @Published public private(set) var brainStatus = "Not refreshed"
     @Published public private(set) var macMeetingActive = false
     @Published public private(set) var phoneMeetingActive = false
-    /// Set when a recording finalizes so the UI can ask for a title/client and
-    /// file the note into the second brain. Each meeting is prompted at most once.
-    @Published public var finishedMeeting: MeetingRecord?
-    private var promptedFinishedMeetingIds: Set<String>
-    private let promptedFinishedMeetingKey = "com.androidbridge.promptedFinishedMeetings"
+    @Published public private(set) var calendarCandidates: [String: [MeetingCalendarEvent]] = [:]
+    @Published public private(set) var calendarMessages: [String: String] = [:]
+    @Published public private(set) var calendarAccessMessage = "Calendar access has not been checked."
+    @Published public private(set) var availableCalendars: [MeetingCalendarDescriptor] = []
+    @Published public private(set) var mainCalendarIdentifier = UserDefaults.standard.string(forKey: "meeting.mainCalendarIdentifier") ?? ""
+    @Published public private(set) var customers: [String] = []
+    @Published public private(set) var customerAssociations: [MeetingCustomerAssociation] = []
+    @Published public private(set) var customerPromptMeetingId: String?
+    @Published public private(set) var customerStatus = "Customer catalog not loaded."
+    private var pendingCustomerEvents: [String: MeetingCalendarEvent] = [:]
     private var zoomAutoMeetingActive = false
     private let brainStore = SecondBrainStore()
+    private let customerStore = MeetingCustomerStore()
 
     /// Broadcast for inbound events so the app can show a banner (reliable without notification entitlements).
     public let notificationSubject = PassthroughSubject<(title: String, body: String, userInfo: [AnyHashable: Any]), Never>()
@@ -76,20 +86,41 @@ public final class LinkManager: ObservableObject {
     private var macStartedMeetingId: String?
     private let meetingStore = MeetingStore.shared
     private let whisper = WhisperTranscriptionService()
+    private let calendarService = MeetingCalendarService()
     private let macRecorder = MacMeetingRecorder.shared
     private let meetingProcessingQueue = DispatchQueue(label: "com.androidbridge.meeting.processing")
+    private let meetingFinalizationQueue = DispatchQueue(label: "com.androidbridge.meeting.finalization")
+    private let brainRefreshQueue = DispatchQueue(label: "com.androidbridge.second-brain.refresh")
+    private var lastBrainRevision = ""
     private var lastPasteboardChange = 0
-    private var suppressClip: String?
 
     public let deviceName: String
     public let fingerprint: String
+    public var brainStorePath: String { brainStore.rootURL.path }
     private let identity: SelfSignedIdentity
 
     public static let shared = LinkManager(deviceName: Host.current().localizedName ?? "Mac")
     private var started = false
 
     private func refreshMeetings() {
-        DispatchQueue.main.async { self.meetings = self.meetingStore.listMeetings(activeIds: self.activeMeetingIds) }
+        let records = meetingStore.listMeetings(activeIds: activeMeetingIds)
+        do {
+            let catalog = try customerStore.customers(meetingNames: records.map(\.company))
+            let associations = try customerStore.associations()
+            DispatchQueue.main.async {
+                self.meetings = records
+                self.customers = catalog
+                self.customerAssociations = associations
+                self.customerStatus = "\(catalog.count) customers • \(associations.count) learned matches"
+            }
+        } catch {
+            DispatchQueue.main.async {
+                self.meetings = records
+                self.customers = []
+                self.customerAssociations = []
+                self.customerStatus = error.localizedDescription
+            }
+        }
     }
 
     private func pushEvent(_ text: String) {
@@ -126,11 +157,18 @@ public final class LinkManager: ObservableObject {
         self.fingerprint = identity.fingerprint
         // Restore known (paired) devices so we auto-reconnect without re-pairing.
         self.pairedFingerprints = Set(UserDefaults.standard.stringArray(forKey: pairedKey) ?? [])
-        self.promptedFinishedMeetingIds = Set(UserDefaults.standard.stringArray(forKey: promptedFinishedMeetingKey) ?? [])
         cleanReceivedFiles()
+        meetingStore.recoverInterruptedProcessing()
         macRecorder.onUpdate = { [weak self] in self?.refreshMeetings() }
-        macRecorder.onFinished = { [weak self] notes in self?.promptFinishedMeeting(notesURL: notes) }
+        macRecorder.onFinished = { [weak self] notes in self?.completeFinalization(notesURL: notes, sourceMeetingId: nil) }
         refreshMeetings()
+        // Initial state: register the installed app for Calendar access and
+        // generate summaries that are still missing.
+        if !CommandLine.arguments.contains(where: { $0.contains("xctest") }) {
+            requestCalendarAccess()
+            refreshCalendars()
+            backfillMissingSummaries()
+        }
     }
 
     private func rememberPaired(_ fp: String) {
@@ -147,12 +185,10 @@ public final class LinkManager: ObservableObject {
         requestNotificationAuthorization()
         startBrowser()
         startClipboardWatch()
-        startAutoMeetingWatch()
         setStatus(.discovering)
     }
 
-    /// Auto-sync the system clipboard: whenever the Mac clipboard changes (Cmd+C), push text (or files)
-    /// to the phone. Incoming clipboard is written to the pasteboard so Cmd+V pastes it.
+    /// Observe the pasteboard for the opt-in Auto Sync mode. Manual Push Clipboard remains available.
     private func startClipboardWatch() {
         DispatchQueue.main.async {
             self.lastPasteboardChange = NSPasteboard.general.changeCount
@@ -162,11 +198,9 @@ public final class LinkManager: ObservableObject {
 
     private func startAutoMeetingWatch() {
         DispatchQueue.main.async {
-            // Never trigger the system permission dialog from automatic meeting
-            // detection. The setup wizard reports the live TCC state and lets the
-            // user open System Settings deliberately.
             if !CGPreflightScreenCaptureAccess() {
-                self.pushEvent("⚠️ Screen Recording is off — remote meeting audio won't be captured (System Settings → Privacy & Security)")
+                _ = CGRequestScreenCaptureAccess()
+                self.pushEvent("⚠️ Allow Screen Recording once, then relaunch Android Bridge; future signed updates preserve it")
             }
             Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in self?.pollVideoMeeting() }
         }
@@ -270,10 +304,7 @@ public final class LinkManager: ObservableObject {
         guard pb.changeCount != lastPasteboardChange else { return }
         lastPasteboardChange = pb.changeCount
         guard connection != nil else { return }
-        if let text = pb.string(forType: .string), !text.isEmpty, text != suppressClip {
-            send(Mappers.clipboard(text))
-            pushEvent("📋 Sent clipboard")
-        }
+        if let text = pb.string(forType: .string), !text.isEmpty { sendClipboard(text, userInitiated: false) }
     }
 
     public func stop() {
@@ -314,7 +345,19 @@ public final class LinkManager: ObservableObject {
         }
     }
 
-    public func sendClipboard(_ text: String) { send(Mappers.clipboard(text)) }
+    public func setClipboardAutoSync(_ enabled: Bool) {
+        clipboardAutoSync = enabled
+        UserDefaults.standard.set(enabled, forKey: "clipboard.autoSync")
+    }
+
+    public func sendClipboard(_ text: String, userInitiated: Bool = true) {
+        let policy = ClipboardSyncPolicy(clipboardAutoSync ? .auto : .manual)
+        guard policy.shouldSend(userInitiated: userInitiated) else { return }
+        guard !text.isEmpty else { pushEvent("📋 Clipboard is empty"); return }
+        guard text.utf8.count <= 900_000 else { pushEvent("⚠️ Clipboard text is too large; send it as a file"); return }
+        send(Mappers.clipboard(text))
+        pushEvent("📋 Sent clipboard")
+    }
     public func requestPhoneScreen() { send(Mappers.screenRequest()); pushEvent("🖥️ Requested phone screen") }
     public func tapPhone(x: Double, y: Double, w: Double, h: Double) { send(Mappers.inputTap(x: x, y: y, w: w, h: h)) }
     public func swipePhone(x1: Double, y1: Double, x2: Double, y2: Double, w: Double, h: Double) { send(Mappers.inputSwipe(x1: x1, y1: y1, x2: x2, y2: y2, w: w, h: h)) }
@@ -464,13 +507,12 @@ public final class LinkManager: ObservableObject {
             let text = f("text")
             DispatchQueue.main.async {
                 self.lastClipboard = text
-                self.suppressClip = text
                 let pb = NSPasteboard.general
                 pb.clearContents()
                 pb.setString(text, forType: .string)
-                self.lastPasteboardChange = pb.changeCount // don't echo back
+                self.lastPasteboardChange = pb.changeCount
             }
-            pushEvent("📋 Clipboard: \(text)")
+            pushEvent("📋 Clipboard received")
         case MessageTypes.notifPosted:
             pushEvent("🔔 \(f("title")): \(f("text"))")
             postNotification(title: f("title"), body: f("text"))
@@ -524,18 +566,12 @@ public final class LinkManager: ObservableObject {
             meetingStartTimes[meetingId] = startedAt
             activeMeetingIds.insert(meetingId)
             meetingStore.markStarted(meetingId: meetingId, startedAtMs: startedAt)
+            meetingStore.setProcessingState(meetingId: meetingId, state: .recording)
             refreshMeetings()
             pushEvent("🎙️ Meeting started")
             send(Message(id: UUID().uuidString, type: MessageTypes.meetingProcessingStatus, payload: ["meetingId": .string(meetingId), "state": .string("receiving")]))
         case MessageTypes.meetingStop:
-            let meetingId = f("meetingId")
-            let notes = meetingStore.finalizeMeeting(meetingId: meetingId, photos: meetingPhotos[meetingId] ?? [])
-            meetingStartTimes.removeValue(forKey: meetingId)
-            activeMeetingIds.remove(meetingId)
-            refreshMeetings()
-            pushEvent("📝 Meeting notes ready")
-            send(Message(id: UUID().uuidString, type: MessageTypes.meetingNotesReady, payload: ["meetingId": .string(meetingId), "path": .string(notes.path)]))
-            promptFinishedMeeting(notesURL: notes)
+            beginPhoneMeetingFinalization(meetingId: f("meetingId"), endedAtMs: Int(f("endedAt")) ?? Int(Date().timeIntervalSince1970 * 1000))
         case MessageTypes.meetingAudioChunkOffer:
             let meetingId = f("meetingId")
             if !meetingId.isEmpty && !activeMeetingIds.contains(meetingId) {
@@ -543,6 +579,7 @@ public final class LinkManager: ObservableObject {
                 meetingStartTimes[meetingId] = startedAt
                 activeMeetingIds.insert(meetingId)
                 meetingStore.markStarted(meetingId: meetingId, startedAtMs: startedAt)
+                meetingStore.setProcessingState(meetingId: meetingId, state: .recording)
                 refreshMeetings()
                 pushEvent("🎙️ Meeting detected from audio chunk")
             }
@@ -556,6 +593,37 @@ public final class LinkManager: ObservableObject {
         case MessageTypes.screenStart: pushEvent("🖥️ Screen mirror requested (stream \(f("streamId")))")
         default: break
         }
+    }
+
+    private func beginPhoneMeetingFinalization(meetingId: String, endedAtMs: Int) {
+        guard !meetingId.isEmpty else { return }
+        meetingStore.markEnded(meetingId: meetingId, endedAtMs: endedAtMs)
+        meetingStore.setProcessingState(meetingId: meetingId, state: .finalizing)
+        meetingStartTimes.removeValue(forKey: meetingId)
+        activeMeetingIds.remove(meetingId)
+        DispatchQueue.main.async { self.phoneMeetingActive = false }
+        refreshMeetings()
+        pushEvent("📝 Recording stopped — finalizing in background")
+        meetingProcessingQueue.async {
+            self.meetingFinalizationQueue.async {
+                let notes = self.meetingStore.finalizeMeeting(meetingId: meetingId, photos: self.meetingPhotos[meetingId] ?? [])
+                self.completeFinalization(notesURL: notes, sourceMeetingId: meetingId)
+            }
+        }
+    }
+
+    private func completeFinalization(notesURL: URL, sourceMeetingId: String?) {
+        let directory = notesURL.deletingLastPathComponent()
+        guard let meeting = meetingStore.listMeetings().first(where: { $0.url.standardizedFileURL == directory.standardizedFileURL }) else { return }
+        let state = processingOutcome(for: meeting)
+        meetingStore.setProcessingState(in: directory, state: state)
+        refreshMeetings()
+        pushEvent(state == .ready ? "📝 Meeting notes ready" : "⚠️ Transcript saved; summary needs attention")
+        if let sourceMeetingId {
+            send(Message(id: UUID().uuidString, type: MessageTypes.meetingNotesReady, payload: ["meetingId": .string(sourceMeetingId), "path": .string(notesURL.path)]))
+            meetingPhotos.removeValue(forKey: sourceMeetingId)
+        }
+        enrichMeetingFromCalendar(meeting)
     }
 
     private func handleMeetingAudioChunk(_ message: Message, _ f: (String) -> String) {
@@ -587,8 +655,10 @@ public final class LinkManager: ObservableObject {
         let capturedAtMs = max(0, (Int(f("capturedAtMs")) ?? base) - base)
         let photo = MeetingPhoto(photoId: photoId, capturedAtMs: capturedAtMs, fileName: url.lastPathComponent)
         meetingPhotos[meetingId, default: []].append(photo)
-        _ = meetingStore.writeNotes(meetingId: meetingId, photos: meetingPhotos[meetingId] ?? [])
-        refreshMeetings()
+        meetingProcessingQueue.async {
+            _ = self.meetingStore.writeNotes(meetingId: meetingId, photos: self.meetingPhotos[meetingId] ?? [])
+            self.refreshMeetings()
+        }
         send(Message(id: UUID().uuidString, type: MessageTypes.meetingPhotoReceived, payload: ["meetingId": .string(meetingId), "photoId": .string(photoId), "checksum": .string(f("checksum"))]))
         pushEvent("📷 Meeting photo received")
     }
@@ -659,6 +729,7 @@ public final class LinkManager: ObservableObject {
             return
         }
         meetingStore.markStarted(meetingId: id, startedAtMs: Int(Date().timeIntervalSince1970 * 1000))
+        meetingStore.setProcessingState(meetingId: id, state: .recording)
         activeMeetingIds.insert(id)
         DispatchQueue.main.async { self.macMeetingActive = true }
         refreshMeetings()
@@ -666,11 +737,14 @@ public final class LinkManager: ObservableObject {
     }
 
     public func stopMeetingOnMac() {
-        macRecorder.stop()
-        activeMeetingIds.removeAll()
+        guard let meetingId = macRecorder.stop() else { return }
+        let endedAtMs = Int(Date().timeIntervalSince1970 * 1000)
+        meetingStore.markEnded(meetingId: meetingId, endedAtMs: endedAtMs)
+        meetingStore.setProcessingState(meetingId: meetingId, state: .finalizing)
+        activeMeetingIds.remove(meetingId)
         DispatchQueue.main.async { self.macMeetingActive = false }
         refreshMeetings()
-        pushEvent("📝 Mac recording stopped — transcribing last chunk in background")
+        pushEvent("📝 Mac recording stopped — finalizing in background")
     }
 
     public func startMeetingOnPhone(title: String = "") {
@@ -680,6 +754,7 @@ public final class LinkManager: ObservableObject {
         meetingStartTimes[meetingId] = startedAt
         activeMeetingIds.insert(meetingId)
         meetingStore.markStarted(meetingId: meetingId, startedAtMs: startedAt)
+        meetingStore.setProcessingState(meetingId: meetingId, state: .recording)
         DispatchQueue.main.async { self.phoneMeetingActive = true }
         refreshMeetings()
         send(Message(id: UUID().uuidString, type: MessageTypes.meetingStart, payload: ["meetingId": .string(meetingId), "title": .string(title), "startedAt": .int(meetingStartTimes[meetingId] ?? 0)]))
@@ -722,18 +797,33 @@ public final class LinkManager: ObservableObject {
 
     public func changeMeetingCompany(_ meeting: MeetingRecord, to company: String) {
         DispatchQueue.global(qos: .userInitiated).async {
-            let oldPath = meeting.brainPath
-            self.meetingStore.setCompany(meeting, to: company)
-            do {
-                let path = try SecondBrainExporter().transfer(meeting: meeting, client: company)
-                self.meetingStore.setBrainPath(meeting, to: path)
-                if let oldPath, oldPath != path { try? self.brainStore.deleteNote(path: oldPath) }
-                self.pushEvent("🧠 Updated meeting company: \(company)")
-            } catch {
-                self.pushEvent("🧠 Second brain company update failed: \(error.localizedDescription)")
+            let clean = company.trimmingCharacters(in: .whitespacesAndNewlines)
+            if clean.isEmpty {
+                self.meetingStore.setCompany(meeting, to: "")
+                self.refreshMeetings()
+                return
             }
-            self.refreshMeetings()
+            do {
+                let client = try self.canonicalCustomer(clean)
+                if let oldPath = meeting.brainPath {
+                    let path = try SecondBrainExporter().transfer(meeting: meeting, client: client)
+                    self.meetingStore.setCompany(meeting, to: client)
+                    self.meetingStore.setBrainPath(meeting, to: path)
+                    if oldPath != path { try? self.brainStore.deleteNote(path: oldPath) }
+                    self.pushEvent("🧠 Updated transferred meeting customer")
+                } else {
+                    self.meetingStore.setCompany(meeting, to: client)
+                }
+                self.refreshMeetings()
+            } catch {
+                DispatchQueue.main.async { self.customerStatus = error.localizedDescription }
+            }
         }
+    }
+
+    private func canonicalCustomer(_ name: String) throws -> String {
+        let stored = try customerStore.addCustomer(name)
+        return SecondBrainExporter().canonicalClientName(stored)
     }
 
     /// Recover a meeting whose chunks were saved but never transcribed.
@@ -749,11 +839,45 @@ public final class LinkManager: ObservableObject {
 
     public func regenerateMeetingSummary(_ meeting: MeetingRecord) {
         DispatchQueue.main.async { self.regeneratingSummaryIds.insert(meeting.id) }
+        meetingStore.setProcessingState(in: meeting.url, state: .finalizing)
         DispatchQueue.global(qos: .userInitiated).async {
             self.meetingStore.regenerateSummary(meeting)
+            let refreshed = self.meetingStore.listMeetings().first { $0.url.standardizedFileURL == meeting.url.standardizedFileURL }
+            let state = refreshed.map(self.processingOutcome) ?? .needsAttention
+            self.meetingStore.setProcessingState(in: meeting.url, state: state)
             self.refreshMeetings()
-            self.pushEvent("📝 Summary regenerated")
+            self.pushEvent(state == .ready ? "📝 Summary regenerated" : "⚠️ Summary generation failed; check the Summarize model")
             DispatchQueue.main.async { self.regeneratingSummaryIds.remove(meeting.id) }
+        }
+    }
+
+    private func processingOutcome(for meeting: MeetingRecord) -> MeetingProcessingState {
+        let hasRecordedContent = !meeting.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !meeting.audioFiles.isEmpty
+        return hasRecordedContent && meeting.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .needsAttention : .ready
+    }
+
+    public func backfillMissingSummaries(force: Bool = false) {
+        guard !summaryBackfillRunning else {
+            summaryBackfillStatus = "A backfill run is already in progress — wait for it to finish."
+            return
+        }
+        summaryBackfillRunning = true
+        summaryBackfillStatus = "Checking for missing summaries…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = self.meetingStore.backfillMissingSummaries(force: force, onProgress: { index, total in
+                DispatchQueue.main.async { self.summaryBackfillStatus = "Processing meeting \(index) of \(total) (transcribing if needed)…" }
+            })
+            self.refreshMeetings()
+            DispatchQueue.main.async {
+                self.summaryBackfillRunning = false
+                if result.attempted == 0 {
+                    self.summaryBackfillStatus = "All meetings already have a summary."
+                } else if result.completed < result.attempted {
+                    self.summaryBackfillStatus = "Generated \(result.completed) of \(result.attempted) summaries. Check the selected provider and model."
+                } else {
+                    self.summaryBackfillStatus = result.completed == 1 ? "Generated 1 missing summary." : "Generated \(result.completed) missing summaries."
+                }
+            }
         }
     }
 
@@ -772,16 +896,46 @@ public final class LinkManager: ObservableObject {
         }
     }
 
-    public func refreshBrain(loadMap: Bool = false) {
+    public func refreshBrain(loadMap: Bool = false, refreshSelectedContent: Bool = true) {
         let path = selectedBrainPath
-        DispatchQueue.global(qos: .utility).async {
-            do {
-                let nodes = try self.brainStore.tree()
-                let edges = loadMap ? self.brainStore.edges() : self.brainEdges
-                let content = try self.brainStore.show(path)
-                DispatchQueue.main.async { self.brainNodes = nodes; self.brainEdges = edges; self.selectedBrainContent = content }
-            } catch { self.pushEvent("🧠 Second brain refresh failed: \(error.localizedDescription)") }
+        let existingEdges = brainEdges
+        brainRefreshQueue.async {
+            self.loadBrain(path: path, loadMap: loadMap, existingEdges: existingEdges, refreshSelectedContent: refreshSelectedContent)
         }
+    }
+
+    public func refreshBrainIfChanged(loadMap: Bool = false, refreshSelectedContent: Bool = true) {
+        let path = selectedBrainPath
+        let existingEdges = brainEdges
+        brainRefreshQueue.async {
+            guard self.brainStore.revision() != self.lastBrainRevision else { return }
+            self.loadBrain(path: path, loadMap: loadMap, existingEdges: existingEdges, refreshSelectedContent: refreshSelectedContent)
+        }
+    }
+
+    private func loadBrain(path: String, loadMap: Bool, existingEdges: [BrainEdge], refreshSelectedContent: Bool) {
+        do {
+            let nodes = try brainStore.tree()
+            let edges = loadMap ? brainStore.edges() : existingEdges
+            let content = refreshSelectedContent ? try brainStore.show(path) : nil
+            let status = "\(nodes.filter { !$0.isDirectory }.count) notes • refreshed \(Date().formatted(date: .omitted, time: .shortened))"
+            lastBrainRevision = brainStore.revision()
+            DispatchQueue.main.async {
+                self.brainNodes = nodes
+                self.brainEdges = edges
+                if let content { self.selectedBrainContent = content }
+                self.brainStatus = status
+            }
+        } catch {
+            brainFailure("Refresh", error)
+        }
+    }
+
+    private func brainFailure(_ action: String, _ error: Error) {
+        let message = "\(action) failed. Check the Second Brain root and try again."
+        DispatchQueue.main.async { self.brainStatus = message }
+        pushEvent("🧠 \(message)")
+        dbg("SECOND_BRAIN action=\(action) error=\(String(describing: type(of: error)))")
     }
 
     public func loadBrainMap() {
@@ -799,7 +953,7 @@ public final class LinkManager: ObservableObject {
             do {
                 let content = try self.brainStore.show(path)
                 DispatchQueue.main.async { self.selectedBrainContent = content }
-            } catch { self.pushEvent("🧠 Second brain read failed: \(error.localizedDescription)") }
+            } catch { self.brainFailure("Read", error) }
         }
     }
 
@@ -810,7 +964,7 @@ public final class LinkManager: ObservableObject {
             do {
                 let results = try self.brainStore.search(clean)
                 DispatchQueue.main.async { self.brainSearchResults = results }
-            } catch { self.pushEvent("🧠 Second brain search failed: \(error.localizedDescription)") }
+            } catch { self.brainFailure("Search", error) }
         }
     }
 
@@ -818,14 +972,18 @@ public final class LinkManager: ObservableObject {
         DispatchQueue.main.async { self.brainSearchResults = [] }
     }
 
-    public func saveBrainNode(_ content: String) {
+    public func saveBrainNode(_ content: String, completion: ((Bool) -> Void)? = nil) {
         let path = selectedBrainPath
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 try self.brainStore.save(path: path, content: content)
                 self.refreshBrain()
                 self.pushEvent("🧠 Saved \(path)")
-            } catch { self.pushEvent("🧠 Second brain save failed: \(error.localizedDescription)") }
+                DispatchQueue.main.async { completion?(true) }
+            } catch {
+                self.brainFailure("Save", error)
+                DispatchQueue.main.async { completion?(false) }
+            }
         }
     }
 
@@ -834,7 +992,7 @@ public final class LinkManager: ObservableObject {
             do {
                 try self.brainStore.addNote(cluster: cluster, title: title, summary: title, tags: "android-bridge", body: body)
                 self.refreshBrain()
-            } catch { self.pushEvent("🧠 Second brain add note failed: \(error.localizedDescription)") }
+            } catch { self.brainFailure("Add note", error) }
         }
     }
 
@@ -846,7 +1004,7 @@ public final class LinkManager: ObservableObject {
                 try self.brainStore.deleteNote(path: path)
                 DispatchQueue.main.async { self.selectedBrainPath = "index.md" }
                 self.refreshBrain()
-            } catch { self.pushEvent("🧠 Second brain delete failed: \(error.localizedDescription)") }
+            } catch { self.brainFailure("Delete", error) }
         }
     }
 
@@ -859,7 +1017,7 @@ public final class LinkManager: ObservableObject {
                 let answer = try self.brainStore.answer(path: path, question: clean)
                 let entry = "## Q: \(clean)\n\n\(answer)\n\n"
                 DispatchQueue.main.async { self.brainChat = entry + self.brainChat }
-            } catch { self.pushEvent("🧠 Second brain chat failed: \(error.localizedDescription)") }
+            } catch { self.brainFailure("Chat", error) }
         }
     }
 
@@ -867,56 +1025,206 @@ public final class LinkManager: ObservableObject {
         DispatchQueue.main.async { self.brainTransferIds.insert(meeting.id) }
         DispatchQueue.global(qos: .userInitiated).async {
             do {
+                let client = try self.canonicalCustomer(client)
                 let path = try SecondBrainExporter().transfer(meeting: meeting, client: client)
                 self.meetingStore.setCompany(meeting, to: client)
                 self.meetingStore.setBrainPath(meeting, to: path)
                 self.refreshMeetings()
-                self.pushEvent("🧠 Transferred \"\(meeting.title)\" to second brain: \(path)")
+                self.pushEvent("🧠 Transferred meeting to Second Brain")
             } catch {
-                self.pushEvent("🧠 Second brain transfer failed: \(error.localizedDescription)")
+                self.brainFailure("Meeting transfer", error)
             }
             DispatchQueue.main.async { self.brainTransferIds.remove(meeting.id) }
         }
     }
 
-    /// After a recording finalizes, surface the meeting so the UI can ask for a
-    /// title and client before filing the note into the second brain.
-    private func promptFinishedMeeting(notesURL: URL) {
-        let dir = notesURL.deletingLastPathComponent().standardizedFileURL.path
-        guard let record = meetingStore.listMeetings().first(where: { $0.url.standardizedFileURL.path == dir }) else { return }
-        DispatchQueue.main.async {
-            if self.promptedFinishedMeetingIds.contains(record.id) { return }
-            self.promptedFinishedMeetingIds.insert(record.id)
-            UserDefaults.standard.set(Array(self.promptedFinishedMeetingIds), forKey: self.promptedFinishedMeetingKey)
-            self.finishedMeeting = record
+    public func requestCalendarAccess() {
+        DispatchQueue.main.async { self.calendarAccessMessage = "Requesting Calendar access…" }
+        calendarService.requestAccess { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    self.calendarAccessMessage = "Calendar access is on."
+                    self.refreshCalendars()
+                case .failure(let error): self.calendarAccessMessage = error.localizedDescription
+                }
+            }
         }
     }
 
-    /// Save the finished meeting into the second brain under the given client,
-    /// then apply the chosen title locally. The transfer runs first because
-    /// renaming moves the meeting folder the exporter reads from.
-    public func completeFinishedMeeting(_ meeting: MeetingRecord, title: String, client: String) {
-        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let titled = cleanTitle.isEmpty || cleanTitle == meeting.title ? meeting : MeetingRecord(
-            id: meeting.id, title: cleanTitle, company: meeting.company, brainPath: meeting.brainPath, url: meeting.url, notesURL: meeting.notesURL,
-            date: meeting.date, audioFiles: meeting.audioFiles, imageFiles: meeting.imageFiles,
-            audioCount: meeting.audioCount, photoCount: meeting.photoCount,
-            transcript: meeting.transcript, summary: meeting.summary, questions: meeting.questions,
-            notesUpdatedAt: meeting.notesUpdatedAt, isActive: meeting.isActive)
-        DispatchQueue.main.async { self.brainTransferIds.insert(meeting.id) }
+    public func refreshCalendars() {
+        calendarService.calendars { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let calendars): self.availableCalendars = calendars
+                case .failure(let error): self.calendarAccessMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    public func setMainCalendarIdentifier(_ identifier: String) {
+        mainCalendarIdentifier = identifier
+        UserDefaults.standard.set(identifier, forKey: "meeting.mainCalendarIdentifier")
+    }
+
+    public func enrichMeetingFromCalendar(_ meeting: MeetingRecord) {
+        DispatchQueue.main.async { self.calendarMessages[meeting.id] = "Checking Calendar…" }
+        let end = meeting.endDate ?? meeting.date.addingTimeInterval(60 * 60)
+        if mainCalendarIdentifier.isEmpty {
+            fetchCalendarEvents(meeting: meeting, end: end, calendarIdentifier: nil, fallback: false)
+        } else {
+            fetchCalendarEvents(meeting: meeting, end: end, calendarIdentifier: mainCalendarIdentifier, fallback: true)
+        }
+    }
+
+    private func fetchCalendarEvents(meeting: MeetingRecord, end: Date, calendarIdentifier: String?, fallback: Bool) {
+        calendarService.events(overlapping: meeting.date, end: end, calendarIdentifier: calendarIdentifier, tolerance: 15 * 60) { result in
+            switch result {
+            case .failure(let error): self.calendarFailure(error, meetingId: meeting.id)
+            case .success(let events):
+                if events.isEmpty, fallback {
+                    self.fetchCalendarEvents(meeting: meeting, end: end, calendarIdentifier: nil, fallback: false)
+                } else {
+                    DispatchQueue.main.async { self.calendarAccessMessage = "Calendar access is on." }
+                    self.handleCalendarMatches(events, for: meeting)
+                }
+            }
+        }
+    }
+
+    private func calendarFailure(_ error: Error, meetingId: String) {
+        DispatchQueue.main.async {
+            self.calendarAccessMessage = error.localizedDescription
+            self.calendarMessages[meetingId] = error.localizedDescription
+        }
+    }
+
+    private func handleCalendarMatches(_ events: [MeetingCalendarEvent], for meeting: MeetingRecord) {
+        if events.count == 1 {
+            applyCalendarEvent(events[0], to: meeting)
+            return
+        }
+        DispatchQueue.main.async {
+            self.calendarCandidates[meeting.id] = events
+            self.calendarMessages[meeting.id] = events.isEmpty ? "No overlapping calendar event found." : "Choose one of \(events.count) matching events or enter details manually."
+        }
+    }
+
+    public func selectCalendarEvent(_ event: MeetingCalendarEvent, for meeting: MeetingRecord) {
+        applyCalendarEvent(event, to: meeting)
+    }
+
+    private func applyCalendarEvent(_ event: MeetingCalendarEvent, to meeting: MeetingRecord) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard self.meetingStore.setCalendarEvent(event, for: meeting) else {
+                DispatchQueue.main.async { self.calendarMessages[meeting.id] = "Could not save calendar details. Try again." }
+                return
+            }
+            if !self.meetingStore.hasTitleOverride(meeting) {
+                self.meetingStore.setTitleOverride(meeting, to: event.title)
+            }
+            let needsCustomer = meeting.company.isEmpty && !self.resolveCustomer(event: event, meeting: meeting)
+            self.refreshMeetings()
+            DispatchQueue.main.async {
+                self.calendarCandidates.removeValue(forKey: meeting.id)
+                self.calendarMessages[meeting.id] = needsCustomer ? "Calendar details added. Choose a customer." : "Calendar details added."
+                if needsCustomer {
+                    self.pendingCustomerEvents[meeting.id] = event
+                    if self.customerPromptMeetingId == nil { self.customerPromptMeetingId = meeting.id }
+                }
+            }
+        }
+    }
+
+    private func resolveCustomer(event: MeetingCalendarEvent, meeting: MeetingRecord) -> Bool {
+        do {
+            let catalog = try customerStore.customers(meetingNames: meetingStore.listMeetings().map(\.company))
+            let associations = try customerStore.associations()
+            guard let customer = MeetingCustomerMatcher.resolve(event: event, customers: catalog, associations: associations) else { return false }
+            meetingStore.setCompany(meeting, to: customer)
+            return true
+        } catch {
+            DispatchQueue.main.async { self.customerStatus = error.localizedDescription }
+            return false
+        }
+    }
+
+    public func confirmCustomer(_ customer: String, for meeting: MeetingRecord) {
+        let event = pendingCustomerEvents[meeting.id]
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let path = try SecondBrainExporter().transfer(meeting: titled, client: client)
-                self.meetingStore.setCompany(meeting, to: client)
-                self.meetingStore.setBrainPath(meeting, to: path)
-                self.pushEvent("🧠 Transferred \"\(titled.title)\" to second brain: \(path)")
+                let canonical = try self.canonicalCustomer(customer)
+                self.meetingStore.setCompany(meeting, to: canonical)
+                if let event { try self.customerStore.remember(event: event, customer: canonical) }
+                DispatchQueue.main.async { self.finishCustomerPrompt(meetingId: meeting.id) }
+                self.refreshMeetings()
             } catch {
-                self.pushEvent("🧠 Second brain transfer failed: \(error.localizedDescription)")
+                DispatchQueue.main.async { self.customerStatus = error.localizedDescription }
             }
-            if titled.title != meeting.title { self.meetingStore.renameMeeting(meeting, to: titled.title) }
-            self.refreshMeetings()
-            DispatchQueue.main.async { self.brainTransferIds.remove(meeting.id) }
         }
+    }
+
+    public func dismissCustomerPrompt(for meeting: MeetingRecord) {
+        finishCustomerPrompt(meetingId: meeting.id)
+    }
+
+    private func finishCustomerPrompt(meetingId: String) {
+        pendingCustomerEvents.removeValue(forKey: meetingId)
+        if customerPromptMeetingId == meetingId {
+            customerPromptMeetingId = pendingCustomerEvents.keys.sorted().first
+        }
+    }
+
+    public func changeCustomerAssociation(_ association: MeetingCustomerAssociation, to customer: String) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try self.customerStore.changeAssociation(id: association.id, customer: customer)
+                self.refreshMeetings()
+            } catch {
+                DispatchQueue.main.async { self.customerStatus = error.localizedDescription }
+            }
+        }
+    }
+
+    public func forgetCustomerAssociation(_ association: MeetingCustomerAssociation) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try self.customerStore.forgetAssociation(id: association.id)
+                self.refreshMeetings()
+            } catch {
+                DispatchQueue.main.async { self.customerStatus = error.localizedDescription }
+            }
+        }
+    }
+
+    public func beginManualCalendarEntry(for meeting: MeetingRecord) {
+        clearCalendarSelection(for: meeting, message: "Enter the title and customer manually.")
+    }
+
+    public func dismissCalendarCandidates(for meeting: MeetingRecord) {
+        clearCalendarSelection(for: meeting, message: "No calendar event selected.")
+    }
+
+    private func clearCalendarSelection(for meeting: MeetingRecord, message: String) {
+        meetingStore.clearCalendarEvent(for: meeting)
+        calendarCandidates.removeValue(forKey: meeting.id)
+        calendarMessages[meeting.id] = message
+        refreshMeetings()
+    }
+
+    public func retryMeetingFinalization(_ meeting: MeetingRecord) {
+        meetingStore.setProcessingState(in: meeting.url, state: .finalizing)
+        refreshMeetings()
+        meetingFinalizationQueue.async {
+            let notes = self.meetingStore.retryFinalization(meeting)
+            self.completeFinalization(notesURL: notes, sourceMeetingId: nil)
+        }
+    }
+
+    public func openCalendarSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars") else { return }
+        NSWorkspace.shared.open(url)
     }
 
     public func askMeetingQuestion(_ meeting: MeetingRecord, question: String) {
@@ -958,6 +1266,17 @@ public final class LinkManager: ObservableObject {
         }
         if action == "openScreenRecordingSettings" {
             openScreenRecordingSettings()
+        }
+    }
+
+    public func requestScreenRecordingAccess() {
+        DispatchQueue.main.async {
+            if CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() {
+                self.pushEvent("✅ Screen Recording access is on")
+            } else {
+                self.pushEvent("⚠️ Allow Screen Recording, then relaunch Android Bridge")
+                self.openScreenRecordingSettings()
+            }
         }
     }
 

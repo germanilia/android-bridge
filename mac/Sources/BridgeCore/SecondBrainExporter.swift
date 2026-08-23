@@ -23,12 +23,27 @@ public struct SecondBrainExporter {
         brainRoot = (configured?.isEmpty == false ? configured! : (env?.isEmpty == false ? env! : home.appendingPathComponent("second_brain").path))
     }
 
+    /// Company names are case-insensitive: clusters are keyed by slug (which
+    /// lowercases), and if a cluster for this client already exists its stored
+    /// title is the canonical spelling — "acme"/"ACME"/"Acme" all map to it.
+    public func canonicalClientName(_ client: String) -> String {
+        let trimmed = client.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return trimmed }
+        let index = "\(brainRoot)/work/sela/meetings/\(slug(trimmed))/index.md"
+        guard let text = try? String(contentsOfFile: index, encoding: .utf8) else { return trimmed }
+        let title = text.components(separatedBy: .newlines)
+            .first { $0.hasPrefix("# ") }?
+            .dropFirst(2)
+            .trimmingCharacters(in: .whitespaces)
+        return title?.isEmpty == false ? title! : trimmed
+    }
+
     /// Returns the brain-relative path of the created note.
     public func transfer(meeting: MeetingRecord, client: String) throws -> String {
         guard fm.isReadableFile(atPath: scriptURL.path) else {
             throw TransferError(message: "brain.py not found at \(scriptURL.path)")
         }
-        let clientName = client.trimmingCharacters(in: .whitespacesAndNewlines)
+        let clientName = canonicalClientName(client)
         guard !clientName.isEmpty else { throw TransferError(message: "Client name is empty") }
 
         let chain: [(slug: String, title: String, desc: String)] = [
@@ -48,12 +63,21 @@ public struct SecondBrainExporter {
 
         let stamp = DateFormatter.brainNoteStamp.string(from: meeting.date)
         let title = "\(meeting.title) (\(stamp))"
+        let notePath = "\(parent)/\(slug(title)).md"
+        // Re-transferring (e.g. after editing the company back and forth) must
+        // update the note instead of failing on brain.py's "note already exists".
+        if fm.fileExists(atPath: "\(brainRoot)/\(notePath)") {
+            try runBrain(["delete-note", notePath])
+        }
         var arguments = ["add-note", "--cluster", parent, "--title", title, "--summary", "Meeting with \(clientName) on \(stamp)", "--tags", "meeting, \(slug(clientName))"]
         for image in meeting.imageFiles {
             arguments += ["--attach", image.path]
         }
         try runBrain(arguments, stdin: noteBody(meeting, clientName: clientName))
-        return "\(parent)/\(slug(title)).md"
+        guard fm.fileExists(atPath: "\(brainRoot)/\(notePath)") else {
+            throw TransferError(message: "brain.py did not create the note at \(notePath)")
+        }
+        return notePath
     }
 
     private func noteBody(_ meeting: MeetingRecord, clientName: String) -> String {

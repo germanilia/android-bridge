@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ZERO_OID="0000000000000000000000000000000000000000"
+deploy=false
+
+while read -r _local_ref local_oid remote_ref _remote_oid; do
+    if [ "$remote_ref" = "refs/heads/main" ] && [ "$local_oid" != "$ZERO_OID" ]; then
+        deploy=true
+    fi
+done
+
+[ "$deploy" = true ] || exit 0
+exec "$ROOT/scripts/update-local-apps.sh"

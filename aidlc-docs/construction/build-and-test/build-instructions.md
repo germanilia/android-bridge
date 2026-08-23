@@ -31,11 +31,10 @@ runnable macOS `.app` is produced via `mac/scripts/make-macos-app.sh`.
 ## 4. Mac app (`mac/`)
 - **Requires:** Swift 5.9+ (Xcode 26.6 present). **`swift build` compiles + links** `BridgeCore`, the
   `AndroidBridge` SwiftUI app target, and `MacCheck`.
-- **Build:** `cd mac && swift build` ✅ · **Tests:** `swift test` (XCTest + SwiftCheck) → 10 tests ✅
-  · **Xcode-free smoke:** `swift run MacCheck` → 13 checks ✅
+- **Build:** `cd mac && swift build` ✅ · **Tests:** `swift test` (XCTest + SwiftCheck) → 30 tests ✅
+  · **Xcode-free smoke:** `swift run MacCheck` → 14 checks ✅
 - **Runnable `.app`:** `mac/scripts/make-macos-app.sh` → `mac/dist/AndroidBridge.app` (Mach-O arm64,
-  ad-hoc signed); `open dist/AndroidBridge.app` launches it. ✅ (Distribution notarization still needs a
-  Developer ID.)
+  signed with the configured stable identity); `open dist/AndroidBridge.app` launches it. ✅ Calendar enrichment requires the generated `NSCalendarsUsageDescription` and `NSCalendarsFullAccessUsageDescription` keys. Distribution notarization still needs a Developer ID.
 
 ---
 
@@ -55,3 +54,12 @@ runnable macOS `.app` is produced via `mac/scripts/make-macos-app.sh`.
 | `android/` on emulator | ✅ | `adb install -r …app-debug.apk` (AVD `bridge34`) |
 | `mac/` compile + tests | ✅ | `swift build` · `swift test` |
 | `mac/` runnable `.app` | ✅ | `mac/scripts/make-macos-app.sh` |
+
+## 5. Direct distribution production artifacts
+
+- Validate release tooling: `python3 -m unittest scripts/test_release.py`.
+- Build a public Mac app with `NO_INSTALL=1 EXCLUDE_LOCAL_TOOL_ENV=1 CODESIGN_IDENTITY='Android Bridge Distribution' EXPECTED_CODESIGN_REQUIREMENT_FILE=mac/distribution-signing-requirement.txt mac/scripts/make-macos-app.sh`.
+- Build and mount-check the DMG with `scripts/make-dmg.sh mac/dist/AndroidBridge.app <output.dmg> mac/distribution-signing-requirement.txt`.
+- Build Android release with the four documented `ANDROID_RELEASE_*` environment variables and `cd android && ./gradlew :app:assembleRelease --no-daemon`.
+- Verify the APK with Android SDK `apksigner verify --verbose --print-certs`.
+- CI generates CycloneDX SBOMs, runs Grype, validates the complete manifest/checksum set, then publishes.

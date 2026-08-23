@@ -27,6 +27,10 @@ android/local.properties
 secrets.properties
 local.env
 
+# Python
+__pycache__/
+*.py[cod]
+
 # Local AI workflow/rule cache
 .aidlc-rule-details/
 CLAUDE.md

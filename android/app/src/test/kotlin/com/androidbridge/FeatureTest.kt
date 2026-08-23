@@ -7,6 +7,10 @@ import com.androidbridge.protocol.MessageTypes
 import com.androidbridge.protocol.validate
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
+import io.kotest.property.Arb
+import io.kotest.property.arbitrary.boolean
+import io.kotest.property.arbitrary.enum
+import io.kotest.property.checkAll
 import kotlinx.serialization.json.jsonPrimitive
 
 class ClipboardSyncTest : StringSpec({
@@ -19,6 +23,12 @@ class ClipboardSyncTest : StringSpec({
     "auto sends on any local copy" {
         val p = ClipboardSyncPolicy(ClipboardSyncMode.AUTO)
         p.shouldSend(userInitiated = false) shouldBe true
+    }
+    "send decision matches mode or explicit action for generated inputs" {
+        checkAll(Arb.enum<ClipboardSyncMode>(), Arb.boolean()) { mode, userInitiated ->
+            ClipboardSyncPolicy(mode).shouldSend(userInitiated) shouldBe
+                (mode == ClipboardSyncMode.AUTO || userInitiated)
+        }
     }
 })
 

@@ -35,6 +35,7 @@ final class AppUIState: ObservableObject {
 
 struct DashboardView: View {
     @ObservedObject var link: LinkManager
+    @ObservedObject var updates: MacUpdateController
     @State private var dropTargeted = false
     @State private var dialNumber = ""
     @State private var activityExpanded = false
@@ -88,12 +89,17 @@ struct DashboardView: View {
                 } else {
                     Button { link.startScreenShare() } label: { Label("Share my screen to phone", systemImage: "rectangle.on.rectangle") }.disabled(!connected)
                 }
+                Button { link.requestScreenRecordingAccess() } label: { Label("Request Screen Recording Access", systemImage: "record.circle") }
                 Button { link.openScreenRecordingSettings() } label: { Label("Open Screen Recording Settings", systemImage: "gear") }
             }
 
             Section("Clipboard & Files") {
-                Text("Copy (⌘C) syncs automatically. Drop files below or use Send File.")
+                Text(link.clipboardAutoSync ? "Clipboard text syncs automatically while connected." : "Clipboard sharing is manual until Auto Sync is enabled.")
                     .font(.callout).foregroundStyle(.secondary)
+                Toggle("Auto Sync clipboard", isOn: Binding(
+                    get: { link.clipboardAutoSync },
+                    set: { link.setClipboardAutoSync($0) }
+                ))
                 RoundedRectangle(cornerRadius: 8)
                     .strokeBorder(dropTargeted ? Color.accentColor : Color.secondary.opacity(0.4), style: StrokeStyle(lineWidth: 1.5, dash: [6]))
                     .frame(height: 64)
@@ -181,15 +187,30 @@ struct DashboardView: View {
             .tabItem { Label("Second Brain", systemImage: "brain.head.profile") }
             .tag(2)
 
-        SettingsTab()
+        SettingsTab(link: link, updates: updates)
             .tabItem { Label("Settings", systemImage: "gearshape") }
             .tag(3)
         }
         .sheet(isPresented: $ui.showSetup) {
             SetupWizardView(link: link)
         }
-        .sheet(item: $link.finishedMeeting) { meeting in
-            MeetingFinishedSheet(link: link, meeting: meeting)
+        .alert("Update Available", isPresented: $updates.showConsent, presenting: updates.availableUpdate) { update in
+            Button("Not Now", role: .cancel) {}
+            Button("Download \(update.version.description)") { updates.approveDownload() }
+        } message: { update in
+            Text("Android Bridge \(update.version.description) is available. Download it now? The update will be verified before macOS opens it.")
+        }
+        .alert("Update Error", isPresented: $updates.showError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(updates.errorMessage)
+        }
+        .alert("Install Android Bridge", isPresented: $updates.showGuidance) {
+            Button("Not Now", role: .cancel) {}
+            Button("Reveal in Finder") { updates.revealVerifiedUpdate() }
+            Button("Open Again") { updates.openVerifiedUpdate() }
+        } message: {
+            Text("Open the verified disk image, drag AndroidBridge.app to Applications, then Control-click the app and choose Open the first time. This build is not Apple-notarized.")
         }
     }
 
@@ -296,6 +317,7 @@ struct MeetingCaptureTab: View {
                         selected: selectedMeetings.contains(meeting.id),
                         name: Binding(get: { meetingRename[meeting.id] ?? meeting.title }, set: { meetingRename[meeting.id] = $0 }),
                         company: Binding(get: { meetingCompany[meeting.id] ?? meeting.company }, set: { meetingCompany[meeting.id] = $0 }),
+                        customers: link.customers,
                         onRename: { link.renameMeeting(meeting, to: meetingRename[meeting.id] ?? meeting.title); meetingRename[meeting.id] = nil },
                         onChangeCompany: {
                             let company = meetingCompany[meeting.id] ?? meeting.company
@@ -351,11 +373,89 @@ struct MeetingCaptureTab: View {
     }
 }
 
+struct CustomerPickerField: View {
+    @Binding var value: String
+    let customers: [String]
+
+    private var filteredCustomers: [String] {
+        let query = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return query.isEmpty ? customers : customers.filter { $0.localizedCaseInsensitiveContains(query) }
+    }
+
+    private var canCreate: Bool {
+        let clean = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !clean.isEmpty && !customers.contains { $0.caseInsensitiveCompare(clean) == .orderedSame }
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            TextField("Search customers", text: $value)
+                .textFieldStyle(.roundedBorder)
+            Menu {
+                ForEach(filteredCustomers, id: \.self) { customer in
+                    Button(customer) { value = customer }
+                }
+                if canCreate {
+                    if !filteredCustomers.isEmpty { Divider() }
+                    Button("Create \"\(value.trimmingCharacters(in: .whitespacesAndNewlines))\"") {
+                        value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                }
+                if filteredCustomers.isEmpty && !canCreate {
+                    Text("No customers")
+                }
+            } label: {
+                Image(systemName: "chevron.down.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .help("Choose an existing customer or create the typed name")
+        }
+    }
+}
+
+struct CustomerChoiceSheet: View {
+    let title: String
+    let message: String
+    let customers: [String]
+    let actionTitle: String
+    let onConfirm: (String) -> Void
+    let onCancel: () -> Void
+    @State private var value: String
+
+    init(title: String, message: String, initialValue: String, customers: [String], actionTitle: String, onConfirm: @escaping (String) -> Void, onCancel: @escaping () -> Void) {
+        self.title = title
+        self.message = message
+        self.customers = customers
+        self.actionTitle = actionTitle
+        self.onConfirm = onConfirm
+        self.onCancel = onCancel
+        _value = State(initialValue: initialValue)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(title).font(.title2).bold()
+            Text(message).foregroundStyle(.secondary)
+            CustomerPickerField(value: $value, customers: customers)
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel, action: onCancel)
+                Button(actionTitle) { onConfirm(value) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 460)
+    }
+}
+
 struct MeetingListRow: View {
     let meeting: MeetingRecord
     let selected: Bool
     @Binding var name: String
     @Binding var company: String
+    let customers: [String]
     let onRename: () -> Void
     let onChangeCompany: () -> Void
     let onDelete: () -> Void
@@ -369,12 +469,13 @@ struct MeetingListRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 if editing {
                     TextField("Meeting name", text: $name).textFieldStyle(.roundedBorder)
-                    TextField("Customer", text: $company).textFieldStyle(.roundedBorder).onSubmit { onRename(); onChangeCompany(); editing = false }
+                    CustomerPickerField(value: $company, customers: customers)
                 } else {
                     Text(meeting.title).font(.headline).lineLimit(1)
                 }
                 Text(meeting.date.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
                 Text(meeting.company.isEmpty ? "No customer" : meeting.company).font(.caption).foregroundStyle(meeting.company.isEmpty ? .tertiary : .secondary)
+                ProcessingStateLabel(state: meeting.processingState)
                 Text("\(meeting.audioCount) recordings · \(meeting.photoCount) images").font(.caption2).foregroundStyle(.secondary)
             }
             Spacer()
@@ -397,6 +498,43 @@ struct MeetingListRow: View {
     }
 }
 
+struct ProcessingStateLabel: View {
+    let state: MeetingProcessingState
+
+    var body: some View {
+        Label(title, systemImage: icon)
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(color)
+    }
+
+    private var title: String {
+        switch state {
+        case .recording: return "Recording"
+        case .finalizing: return "Finalizing"
+        case .ready: return "Ready"
+        case .needsAttention: return "Needs attention"
+        }
+    }
+
+    private var icon: String {
+        switch state {
+        case .recording: return "record.circle"
+        case .finalizing: return "clock.arrow.circlepath"
+        case .ready: return "checkmark.circle"
+        case .needsAttention: return "exclamationmark.triangle"
+        }
+    }
+
+    private var color: Color {
+        switch state {
+        case .recording: return .red
+        case .finalizing: return .orange
+        case .ready: return .green
+        case .needsAttention: return .orange
+        }
+    }
+}
+
 /// Small breathing dot used for "recording" and "connecting" states.
 struct PulsingDot: View {
     var color: Color = .red
@@ -410,45 +548,6 @@ struct PulsingDot: View {
             .shadow(color: color.opacity(0.6), radius: on ? 4 : 1)
             .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: on)
             .onAppear { on = true }
-    }
-}
-
-/// Shown automatically when a recording finalizes: lets the user confirm the
-/// meeting title and client so the note lands in the right second-brain cluster.
-struct MeetingFinishedSheet: View {
-    @ObservedObject var link: LinkManager
-    let meeting: MeetingRecord
-    @State private var title: String
-    @AppStorage("secondBrainClient") private var client = ""
-
-    init(link: LinkManager, meeting: MeetingRecord) {
-        self.link = link
-        self.meeting = meeting
-        _title = State(initialValue: meeting.title)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Meeting recorded").font(.title3.bold())
-            Text("Set the title and client to file this note under work/sela/meetings/<client> in your second brain.")
-                .font(.callout).foregroundStyle(.secondary)
-            TextField("Meeting title", text: $title)
-                .textFieldStyle(.roundedBorder)
-            TextField("Client", text: $client)
-                .textFieldStyle(.roundedBorder)
-            HStack {
-                Spacer()
-                Button("Skip") { link.finishedMeeting = nil }
-                Button("Save to Second Brain") {
-                    link.completeFinishedMeeting(meeting, title: title, client: client)
-                    link.finishedMeeting = nil
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(client.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-        }
-        .padding(20)
-        .frame(width: 440)
     }
 }
 
@@ -479,6 +578,17 @@ struct MeetingPreview: View {
 
     private var notesURL: URL { meeting.notesURL ?? meeting.url.appendingPathComponent("notes.md") }
 
+    private var customerSheetPresented: Binding<Bool> {
+        Binding(
+            get: { showBrainPrompt || link.customerPromptMeetingId == meeting.id },
+            set: { presented in
+                guard !presented else { return }
+                showBrainPrompt = false
+                if link.customerPromptMeetingId == meeting.id { link.dismissCustomerPrompt(for: meeting) }
+            }
+        )
+    }
+
     var body: some View {
         GeometryReader { proxy in
             VStack(spacing: 0) {
@@ -506,9 +616,17 @@ struct MeetingPreview: View {
                             }
                         }
                         Text(meeting.date.formatted(date: .complete, time: .shortened)).foregroundStyle(.secondary)
+                        HStack(spacing: 8) {
+                            ProcessingStateLabel(state: meeting.processingState)
+                            if meeting.processingState == .finalizing { ProgressView().controlSize(.small) }
+                            if meeting.processingState == .needsAttention {
+                                Button("Retry finalization") { link.retryMeetingFinalization(meeting) }
+                            }
+                        }
                         HStack {
                             if editingCompany {
-                                TextField("Customer", text: $companyName).textFieldStyle(.roundedBorder).frame(width: 260)
+                                CustomerPickerField(value: $companyName, customers: link.customers)
+                                    .frame(width: 340)
                                 Button { onChangeCompany(); editingCompany = false } label: { Image(systemName: "checkmark.circle.fill") }
                                 Button { companyName = meeting.company; editingCompany = false } label: { Image(systemName: "xmark.circle") }
                             } else {
@@ -524,12 +642,15 @@ struct MeetingPreview: View {
                     }
                     Spacer()
                     Menu("Copy") {
-                        Button("Summary") { copy(meeting.summary) }
+                        Button("Entire summary") { copy(meeting.summary) }
                         Button("Transcript") { copy(meeting.transcript) }
                         Button("Chat") { copy(meeting.questions) }
                         Button("Full note") { copy(noteMarkdown) }
                     }
-                    Button { showBrainPrompt = true } label: {
+                    Button {
+                        if !meeting.company.isEmpty { brainClient = meeting.company }
+                        showBrainPrompt = true
+                    } label: {
                         if link.brainTransferIds.contains(meeting.id) {
                             ProgressView().controlSize(.small)
                         } else {
@@ -537,13 +658,6 @@ struct MeetingPreview: View {
                         }
                     }
                     .disabled(link.brainTransferIds.contains(meeting.id))
-                    .alert("Transfer to Second Brain", isPresented: $showBrainPrompt) {
-                        TextField("Client name", text: $brainClient)
-                        Button("Transfer") { link.transferToSecondBrain(meeting, client: brainClient) }
-                        Button("Cancel", role: .cancel) {}
-                    } message: {
-                        Text("Saves this note under work/sela/meetings/<client> in your second brain.")
-                    }
                     Button { link.retranscribeMeeting(meeting) } label: { Label("Re-transcribe", systemImage: "waveform") }
                         .help("Run Whisper again over the saved audio chunks and rebuild the notes")
                         .disabled(link.regeneratingSummaryIds.contains(meeting.id))
@@ -551,6 +665,74 @@ struct MeetingPreview: View {
                     Button(role: .destructive) { link.deleteMeeting(meeting) } label: { Label("Delete", systemImage: "trash") }
                 }
                 .padding(.trailing, 190)
+                .sheet(isPresented: customerSheetPresented) {
+                    if link.customerPromptMeetingId == meeting.id {
+                        CustomerChoiceSheet(
+                            title: "Choose customer",
+                            message: "This calendar event has no safe customer match. Your choice will be remembered.",
+                            initialValue: "",
+                            customers: link.customers,
+                            actionTitle: "Use Customer",
+                            onConfirm: { link.confirmCustomer($0, for: meeting) },
+                            onCancel: { link.dismissCustomerPrompt(for: meeting) }
+                        )
+                    } else {
+                        CustomerChoiceSheet(
+                            title: "Transfer to Second Brain",
+                            message: "Saves this meeting under the selected customer.",
+                            initialValue: brainClient,
+                            customers: link.customers,
+                            actionTitle: "Transfer",
+                            onConfirm: { link.transferToSecondBrain(meeting, client: $0); showBrainPrompt = false },
+                            onCancel: { showBrainPrompt = false }
+                        )
+                    }
+                }
+
+                SectionBox("Calendar") {
+                    Text("Uses events already available in Apple Calendar, including configured Google accounts.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text(link.calendarAccessMessage)
+                        .font(.caption)
+                        .foregroundStyle(link.calendarAccessMessage == "Calendar access is on." ? .green : .secondary)
+                    if let event = meeting.calendarEvent {
+                        Label(event.title, systemImage: "calendar.badge.checkmark")
+                            .font(.headline)
+                        Text("\(event.calendarTitle) · \(event.start.formatted(date: .abbreviated, time: .shortened))–\(event.end.formatted(date: .omitted, time: .shortened))")
+                            .font(.caption).foregroundStyle(.secondary)
+                        if let organizer = event.organizer { Text("Organizer: \(organizer)").font(.caption).foregroundStyle(.secondary) }
+                    }
+                    if let message = link.calendarMessages[meeting.id] {
+                        Text(message).font(.callout).foregroundStyle(.secondary)
+                    }
+                    let candidates = link.calendarCandidates[meeting.id] ?? []
+                    HStack {
+                        if !candidates.isEmpty {
+                            Menu("Choose calendar event") {
+                                ForEach(candidates) { event in
+                                    Button("\(event.title) — \(event.start.formatted(date: .omitted, time: .shortened))") {
+                                        link.selectCalendarEvent(event, for: meeting)
+                                    }
+                                }
+                                Divider()
+                                Button("Enter manually") {
+                                    link.beginManualCalendarEntry(for: meeting)
+                                    meetingName = meeting.title
+                                    companyName = meeting.company
+                                    editingTitle = true
+                                    editingCompany = true
+                                }
+                                Button("No calendar event") { link.dismissCalendarCandidates(for: meeting) }
+                            }
+                        } else {
+                            Button { link.enrichMeetingFromCalendar(meeting) } label: {
+                                Label(meeting.calendarEvent == nil ? "Find Calendar Event" : "Refresh Calendar Match", systemImage: "calendar")
+                            }
+                        }
+                        Button("Request Calendar Access") { link.requestCalendarAccess() }
+                        Button("Calendar Settings") { link.openCalendarSettings() }
+                    }
+                }
 
                 if !meeting.audioFiles.isEmpty {
                     SectionBox("Recordings") {
@@ -584,7 +766,25 @@ struct MeetingPreview: View {
                 SectionBox("Note") {
                     Group {
                     if noteTab == "Summary" {
-                        FormattedNoteText(text: meeting.summary.isEmpty ? "Live summary will appear after the first recorded chunk is transcribed, then update while recording." : meeting.summary)
+                        // Cap the line length — full-window paragraphs are unreadable.
+                        if meeting.summary.isEmpty {
+                            let message = meeting.isActive
+                                ? "Live summary will appear after the first recorded chunk is transcribed."
+                                : meeting.transcript.isEmpty
+                                    ? "No transcript is available yet. Re-transcribe the saved audio chunks."
+                                    : "Transcript captured and available in the Transcript tab. Summary generation failed; check the Summarize model or retry."
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text(message).foregroundStyle(.secondary)
+                                if !meeting.transcript.isEmpty, !meeting.isActive {
+                                    Button("Generate Missing Summary") { link.regenerateMeetingSummary(meeting) }
+                                        .disabled(link.regeneratingSummaryIds.contains(meeting.id))
+                                }
+                            }
+                        } else {
+                            FormattedNoteText(text: meeting.summary)
+                                .frame(maxWidth: 760, alignment: .leading)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     } else if noteTab == "Transcript" {
                         Text(meeting.transcript.isEmpty ? "Transcript is still empty." : meeting.transcript)
                             .font(.system(.body, design: .monospaced)).textSelection(.enabled)
@@ -667,6 +867,8 @@ struct MeetingPreview: View {
                 .labelsHidden()
                 .pickerStyle(.segmented)
                 .frame(width: 150)
+                Button("Copy summary") { copy(meeting.summary) }
+                    .disabled(meeting.summary.isEmpty)
                 if link.regeneratingSummaryIds.contains(meeting.id) {
                     ProgressView().controlSize(.small)
                     Text("Regenerating…").font(.caption).foregroundStyle(.secondary)
@@ -773,17 +975,29 @@ struct FormattedNoteText: View {
     let text: String
 
     private enum Block {
-        case text(AttributedString)
+        case paragraph([String])   // raw lines; markdown is parsed lazily at render time
         case table([[String]])
     }
 
+    // Parsed once at init (cheap string work only). The expensive
+    // AttributedString(markdown:) parsing is deferred to each visible paragraph
+    // by the LazyVStack, so a long note no longer builds one giant Text and
+    // freezes the main thread.
+    private let rtl: Bool
+    private let blocks: [Block]
+
+    init(text: String) {
+        self.text = text
+        self.rtl = text.isMostlyHebrew
+        self.blocks = FormattedNoteText.parse(text)
+    }
+
     var body: some View {
-        let rtl = text.isMostlyHebrew
-        VStack(alignment: rtl ? .trailing : .leading, spacing: 6) {
+        LazyVStack(alignment: rtl ? .trailing : .leading, spacing: 6) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 switch block {
-                case .text(let content):
-                    Text(content)
+                case .paragraph(let lines):
+                    Text(attributedParagraph(lines))
                         .lineSpacing(5)
                         .textSelection(.enabled)
                         .multilineTextAlignment(rtl ? .trailing : .leading)
@@ -797,23 +1011,28 @@ struct FormattedNoteText: View {
         .frame(maxWidth: .infinity, alignment: rtl ? .trailing : .leading)
     }
 
-    /// Consecutive non-table lines are merged into one Text so selection can span
-    /// multiple lines and paragraphs reflow to the available width.
-    private var blocks: [Block] {
+    /// Summaries sometimes come back with bare or numbered section titles
+    /// ("Decisions", "2) Action Items") — promote them to headings so the
+    /// rendered note gets real structure.
+    private static func sectionHeading(_ line: String) -> String? {
+        let sections = ["Summary", "Decisions", "Action Items", "Open Questions/Risks"]
+        for section in sections {
+            if line == section { return "## \(section)" }
+            for n in 1...4 where line == "\(n)) \(section)" || line == "\(n). \(section)" { return "## \(section)" }
+        }
+        return nil
+    }
+
+    /// Groups the note into paragraphs (split on blank lines) and tables. Only
+    /// string work happens here so it stays cheap for very long notes; the
+    /// per-paragraph markdown parsing runs lazily in `attributedParagraph`.
+    private static func parse(_ text: String) -> [Block] {
         var result: [Block] = []
-        var textLines: [AttributedString] = []
+        var paragraph: [String] = []
         var tableRows: [[String]] = []
 
-        func flushText() {
-            while textLines.last?.characters.isEmpty == true { textLines.removeLast() }
-            guard !textLines.isEmpty else { return }
-            var joined = AttributedString()
-            for (index, line) in textLines.enumerated() {
-                if index > 0 { joined += AttributedString("\n") }
-                joined += line
-            }
-            result.append(.text(joined))
-            textLines = []
+        func flushParagraph() {
+            if !paragraph.isEmpty { result.append(.paragraph(paragraph)); paragraph = [] }
         }
         func flushTable() {
             if !tableRows.isEmpty { result.append(.table(tableRows)); tableRows = [] }
@@ -825,20 +1044,34 @@ struct FormattedNoteText: View {
             if lowered == "```" || lowered == "```markdown" { continue }
             if isTableSeparator(trimmed) { continue }
             if let cells = parseTableRow(trimmed) {
-                flushText()
+                flushParagraph()
                 tableRows.append(cells)
                 continue
             }
             flushTable()
             if trimmed.isEmpty {
-                if !textLines.isEmpty, textLines.last?.characters.isEmpty == false { textLines.append(AttributedString("")) }
+                flushParagraph()
+            } else if let heading = sectionHeading(trimmed) {
+                flushParagraph()
+                paragraph.append(heading)
+                flushParagraph()
             } else {
-                textLines.append(attributedLine(trimmed))
+                paragraph.append(trimmed)
             }
         }
-        flushText()
+        flushParagraph()
         flushTable()
         return result
+    }
+
+    /// Builds one paragraph's AttributedString by parsing each of its lines.
+    private func attributedParagraph(_ lines: [String]) -> AttributedString {
+        var joined = AttributedString()
+        for (index, line) in lines.enumerated() {
+            if index > 0 { joined += AttributedString("\n") }
+            joined += attributedLine(line)
+        }
+        return joined
     }
 
     private func attributedLine(_ line: String) -> AttributedString {
@@ -877,14 +1110,14 @@ struct FormattedNoteText: View {
         return text.isEmpty ? nil : (hashes, String(text))
     }
 
-    private func parseTableRow(_ line: String) -> [String]? {
+    private static func parseTableRow(_ line: String) -> [String]? {
         guard line.hasPrefix("|") && line.hasSuffix("|") else { return nil }
         let cells = line.dropFirst().dropLast().split(separator: "|", omittingEmptySubsequences: false)
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
         return cells.isEmpty ? nil : cells
     }
 
-    private func isTableSeparator(_ line: String) -> Bool {
+    private static func isTableSeparator(_ line: String) -> Bool {
         guard line.hasPrefix("|") && line.hasSuffix("|") else { return false }
         let body = line.replacingOccurrences(of: "|", with: "").replacingOccurrences(of: ":", with: "").trimmingCharacters(in: .whitespaces)
         return !body.isEmpty && body.allSatisfy { $0 == "-" || $0.isWhitespace }
@@ -1030,26 +1263,19 @@ struct ChatQAView: View {
 }
 
 struct LLMSettingsView: View {
+    @ObservedObject var link: LinkManager
     let feature: LLMFeature
     @AppStorage private var usePi: Bool
     @AppStorage private var model: String
     @State private var modelSearch = ""
     @State private var ollamaModels = [String]()
+    @State private var piModels = [String]()
+    @State private var piModelError: String?
+    @State private var loadingPiModels = false
 
-    private let piModels = [
-        "github-copilot/gpt-5.4",
-        "github-copilot/claude-sonnet-4.5",
-        "github-copilot/claude-opus-4.5",
-        "openai/gpt-5.2",
-        "openai/gpt-5.2-mini",
-        "anthropic/claude-sonnet-4.5",
-        "anthropic/claude-opus-4.5",
-        "google/gemini-3-pro",
-        "google/gemini-3-flash"
-    ]
-
-    init(_ feature: LLMFeature) {
+    init(_ feature: LLMFeature, link: LinkManager) {
         self.feature = feature
+        self.link = link
         _usePi = AppStorage(wrappedValue: false, "llm.\(feature.key).usePi")
         _model = AppStorage(wrappedValue: "gemma4:e4b", "llm.\(feature.key).model")
     }
@@ -1085,6 +1311,11 @@ struct LLMSettingsView: View {
                     .multilineTextAlignment(.leading)
                     .environment(\.layoutDirection, .leftToRight)
                     .frame(width: 640)
+                HStack {
+                    Button("Refresh pi models") { loadPiModels() }.disabled(loadingPiModels)
+                    if loadingPiModels { ProgressView().controlSize(.small) }
+                    if let piModelError { Text(piModelError).font(.caption).foregroundStyle(.red) }
+                }
             } else {
                 TextField("Search Ollama models", text: $modelSearch)
                     .textFieldStyle(.roundedBorder)
@@ -1092,8 +1323,19 @@ struct LLMSettingsView: View {
                     .environment(\.layoutDirection, .leftToRight)
                     .frame(width: 640)
             }
+            if feature == .summarize {
+                HStack {
+                    Button("Backfill Missing Summaries") { link.backfillMissingSummaries() }
+                        .disabled(link.summaryBackfillRunning)
+                    Button("Regenerate All Summaries") { link.backfillMissingSummaries(force: true) }
+                        .disabled(link.summaryBackfillRunning)
+                        .help("Re-summarizes every meeting with the current language, type, and prompt — use after changing summary settings or to clean up old wall-of-text summaries.")
+                    if link.summaryBackfillRunning { ProgressView().controlSize(.small) }
+                    if let status = link.summaryBackfillStatus { Text(status).font(.caption).foregroundStyle(.secondary) }
+                }
+            }
         }
-        .onAppear { loadOllamaModels() }
+        .onAppear { loadOllamaModels(); loadPiModels() }
     }
 
     private var filteredPiModels: [String] {
@@ -1105,6 +1347,27 @@ struct LLMSettingsView: View {
         let q = modelSearch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let models = ollamaModels.isEmpty ? ["gemma4:e4b"] : ollamaModels
         return q.isEmpty ? models : models.filter { $0.lowercased().contains(q) }
+    }
+
+    private func loadPiModels() {
+        loadingPiModels = true
+        piModelError = nil
+        let executable = UserDefaults.standard.string(forKey: "pi.executable")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        DispatchQueue.global(qos: .utility).async {
+            do {
+                let models = try PiModelCatalog.load(executable: executable?.isEmpty == false ? executable! : "pi")
+                DispatchQueue.main.async {
+                    piModels = models
+                    loadingPiModels = false
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    piModels = []
+                    piModelError = error.localizedDescription
+                    loadingPiModels = false
+                }
+            }
+        }
     }
 
     private func loadOllamaModels() {
@@ -1127,6 +1390,8 @@ struct LLMSettingsView: View {
 }
 
 struct SettingsTab: View {
+    @ObservedObject var link: LinkManager
+    @ObservedObject var updates: MacUpdateController
     @AppStorage("pi.executable") private var piExecutable = "pi"
     @AppStorage("pi.secondBrainSkill") private var piSecondBrainSkill = NSHomeDirectory() + "/.agents/skills/second-brain"
     @AppStorage("secondBrain.root") private var secondBrainRoot = NSHomeDirectory() + "/second_brain"
@@ -1134,6 +1399,28 @@ struct SettingsTab: View {
 
     var body: some View {
         Form {
+            Section("Software Update") {
+                LabeledContent("Installed version", value: updates.installedVersionText)
+                Text(updates.status).font(.caption).foregroundStyle(.secondary)
+                if updates.isChecking || updates.isDownloading {
+                    ProgressView(updates.isDownloading ? "Downloading and verifying…" : "Checking…")
+                }
+                HStack {
+                    Button("Check for Updates") { updates.checkManually() }
+                        .disabled(updates.isChecking || updates.isDownloading)
+                    if let update = updates.availableUpdate {
+                        Button(updates.verifiedUpdate == nil ? "Download \(update.version.description)" : "Open Verified DMG") {
+                            if updates.verifiedUpdate == nil { updates.showConsent = true }
+                            else { updates.openVerifiedUpdate() }
+                        }
+                        .disabled(updates.isDownloading)
+                        Link("View Release Page", destination: update.pageURL)
+                    }
+                }
+                if updates.verifiedUpdate != nil {
+                    Button("Reveal Verified DMG in Finder") { updates.revealVerifiedUpdate() }
+                }
+            }
             Section("Setup") {
                 Button { AppUIState.shared.showSetup = true } label: {
                     Label("Open Setup Wizard…", systemImage: "wand.and.stars")
@@ -1142,14 +1429,53 @@ struct SettingsTab: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("LLM routing") {
-                ForEach(LLMFeature.allCases) { feature in LLMSettingsView(feature) }
+                ForEach(LLMFeature.allCases) { feature in LLMSettingsView(feature, link: link) }
+            }
+            Section("Customers and Calendar") {
+                Picker("Main calendar", selection: Binding(
+                    get: { link.mainCalendarIdentifier },
+                    set: { link.setMainCalendarIdentifier($0) }
+                )) {
+                    Text("No preferred calendar").tag("")
+                    if !link.mainCalendarIdentifier.isEmpty && !link.availableCalendars.contains(where: { $0.id == link.mainCalendarIdentifier }) {
+                        Text("Saved calendar unavailable — using fallback").tag(link.mainCalendarIdentifier)
+                    }
+                    ForEach(link.availableCalendars) { calendar in
+                        Text("\(calendar.title) — \(calendar.source)").tag(calendar.id)
+                    }
+                }
+                HStack {
+                    Button("Refresh calendars") { link.refreshCalendars() }
+                    Text(link.customerStatus).font(.caption).foregroundStyle(.secondary)
+                }
+                if link.customerAssociations.isEmpty {
+                    Text("Customer matches learned from Calendar will appear here.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    ForEach(link.customerAssociations) { association in
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(association.eventTitle).lineLimit(1)
+                                Text(association.externalDomains.joined(separator: ", "))
+                                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            Spacer()
+                            Menu(association.customer) {
+                                ForEach(link.customers, id: \.self) { customer in
+                                    Button(customer) { link.changeCustomerAssociation(association, to: customer) }
+                                }
+                            }
+                            Button("Forget", role: .destructive) { link.forgetCustomerAssociation(association) }
+                        }
+                    }
+                }
             }
             Section("Paths") {
                 pathRow("pi executable", text: $piExecutable, chooseFolder: false)
                 pathRow("Second Brain skill", text: $piSecondBrainSkill, chooseFolder: true)
                 pathRow("Second Brain root", text: $secondBrainRoot, chooseFolder: true)
                 pathRow("Meetings folder", text: $meetingsRoot, chooseFolder: true)
-                Text("Path changes are used for new pi/Second Brain/meeting operations. If a view is already open, press refresh or relaunch after changing roots.")
+                Text("Path changes are used by the next pi, Second Brain, or meeting operation. Second Brain refresh no longer requires a relaunch.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("How pi integration works") {
@@ -1196,6 +1522,7 @@ struct SecondBrainTab: View {
     @State private var addTargetCluster = ""
     @State private var showAddNote = false
     @State private var rawMode = false
+    @State private var draftDirty = false
     @State private var brainView = "Files"
 
     var body: some View {
@@ -1208,6 +1535,8 @@ struct SecondBrainTab: View {
                     Button { link.refreshBrain(loadMap: brainView == "Map") } label: { Image(systemName: "arrow.clockwise") }
                     Button { link.openSecondBrainFolder() } label: { Image(systemName: "folder") }
                 }
+                Text("\(link.brainStorePath) • \(link.brainStatus)")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 HStack {
                     TextField("Search second brain", text: $search).textFieldStyle(.roundedBorder).onSubmit { link.searchBrain(search) }
                     Button("Search") { link.searchBrain(search) }
@@ -1291,14 +1620,17 @@ struct SecondBrainTab: View {
                     }
                     .pickerStyle(.segmented)
                     .frame(width: 180)
-                    Button("Save") { link.saveBrainNode(draft) }.disabled(!rawMode)
+                    Button("Save") { link.saveBrainNode(draft) { if $0 { draftDirty = false } } }.disabled(!rawMode)
                     Button("Add Note") { showAddNote = true }
                     Button("Delete Note", role: .destructive) { link.deleteSelectedBrainNote() }
                         .disabled(link.selectedBrainPath.hasSuffix("index.md"))
                 }
                 Group {
                     if rawMode {
-                        TextEditor(text: $draft)
+                        TextEditor(text: Binding(
+                            get: { draft },
+                            set: { draft = $0; draftDirty = true }
+                        ))
                             .font(.system(.body, design: .monospaced))
                             .border(Color.secondary.opacity(0.25))
                     } else {
@@ -1306,8 +1638,9 @@ struct SecondBrainTab: View {
                             .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
                     }
                 }
-                .onChange(of: link.selectedBrainContent) { draft = $0 }
-                .onAppear { draft = link.selectedBrainContent }
+                .onChange(of: link.selectedBrainContent) { if !draftDirty { draft = $0 } }
+                .onChange(of: link.selectedBrainPath) { _ in draftDirty = false }
+                .onAppear { if !draftDirty { draft = link.selectedBrainContent } }
                 .sheet(isPresented: $showAddNote) { addNoteSheet.frame(width: 560, height: 420) }
 
                 SectionBox("Chat with selected node") {
@@ -1322,8 +1655,14 @@ struct SecondBrainTab: View {
             .padding()
             .frame(minWidth: 620)
         }
-        .onAppear {
-            if link.brainNodes.isEmpty { link.refreshBrain(loadMap: brainView == "Map") }
+        .onAppear { link.refreshBrain(loadMap: brainView == "Map", refreshSelectedContent: !draftDirty) }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                if !Task.isCancelled {
+                    link.refreshBrainIfChanged(loadMap: brainView == "Map", refreshSelectedContent: !draftDirty)
+                }
+            }
         }
         .onChange(of: brainView) { view in
             if view == "Map" { link.loadBrainMap() }
@@ -1491,15 +1830,24 @@ struct BrainMapView: View {
 }
 
 struct BrainMarkdownView: View {
-    let markdown: String
     let currentPath: String
     let open: (String) -> Void
+    // Parsed once at init instead of on every body pass. The per-line
+    // AttributedString(markdown:) work is deferred to the visible rows by the
+    // LazyVStack below, so opening a long note no longer freezes the main thread.
+    private let blocks: [Block]
+
+    init(markdown: String, currentPath: String, open: @escaping (String) -> Void) {
+        self.currentPath = currentPath
+        self.open = open
+        self.blocks = BrainMarkdownView.parse(markdown)
+    }
 
     private enum Block { case line(String), code(String), table([[String]]) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(displayBlocks.enumerated()), id: \.offset) { _, block in
+        LazyVStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 switch block {
                 case .line(let line): lineView(line)
                 case .code(let code): codeView(code)
@@ -1507,6 +1855,13 @@ struct BrainMarkdownView: View {
                 }
             }
         }
+        // Note links are rewritten to brain:// URLs by inlineMarkdown; route them
+        // to the in-app note navigation, everything else to the system browser.
+        .environment(\.openURL, OpenURLAction { url in
+            guard url.scheme == "brain" else { return .systemAction }
+            open(url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).removingPercentEncoding ?? "")
+            return .handled
+        })
     }
 
     private func codeView(_ code: String) -> some View {
@@ -1542,12 +1897,6 @@ struct BrainMarkdownView: View {
             EmptyView()
         } else if let heading = heading(trimmed) {
             Text(inlineMarkdown(heading.text)).font(heading.level == 1 ? .title2.bold() : .headline.bold())
-        } else if let link = markdownLink(trimmed) {
-            HStack(spacing: 4) {
-                if !link.prefix.isEmpty { Text(inlineMarkdown(link.prefix)) }
-                Button(link.title) { open(resolve(link.target)) }.buttonStyle(.link)
-                if !link.suffix.isEmpty { Text(inlineMarkdown(link.suffix)) }
-            }
         } else if trimmed.isEmpty {
             Spacer().frame(height: 4)
         } else if let bullet = bullet(trimmed) {
@@ -1560,7 +1909,7 @@ struct BrainMarkdownView: View {
         }
     }
 
-    private var displayBlocks: [Block] {
+    private static func parse(_ markdown: String) -> [Block] {
         var lines = markdown.components(separatedBy: .newlines)
         if lines.first?.trimmingCharacters(in: .whitespaces) == "---",
            let end = lines.dropFirst().firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "---" }) {
@@ -1596,16 +1945,43 @@ struct BrainMarkdownView: View {
     }
 
     private func inlineMarkdown(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+        (try? AttributedString(markdown: linkified(text), options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
     }
 
-    private func tableRow(_ line: String) -> [String]? {
+    /// Rewrites relative note links (`[t](acme/kickoff.md)`) into `brain://` URLs
+    /// so AttributedString turns every link into a tappable one. External links
+    /// (http, https, mailto…) are left as-is and open in the browser.
+    private func linkified(_ text: String) -> String {
+        guard text.contains("](") else { return text }
+        let pattern = #"\[([^\]]+)\]\(([^)]+)\)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        let ns = text as NSString
+        var out = ""
+        var cursor = 0
+        for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            out += ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
+            let title = ns.substring(with: match.range(at: 1))
+            let target = ns.substring(with: match.range(at: 2))
+            if target.contains("://") || target.hasPrefix("mailto:") {
+                out += "[\(title)](\(target))"
+            } else {
+                let resolved = resolve(target)
+                let encoded = resolved.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? resolved
+                out += "[\(title)](brain:///\(encoded))"
+            }
+            cursor = match.range.location + match.range.length
+        }
+        out += ns.substring(from: cursor)
+        return out
+    }
+
+    private static func tableRow(_ line: String) -> [String]? {
         guard line.hasPrefix("|") && line.hasSuffix("|") && !isTableSeparator(line) else { return nil }
         return line.dropFirst().dropLast().split(separator: "|", omittingEmptySubsequences: false)
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 
-    private func isTableSeparator(_ line: String) -> Bool {
+    private static func isTableSeparator(_ line: String) -> Bool {
         guard line.hasPrefix("|") && line.hasSuffix("|") else { return false }
         let body = line.replacingOccurrences(of: "|", with: "").replacingOccurrences(of: ":", with: "").trimmingCharacters(in: .whitespaces)
         return !body.isEmpty && body.allSatisfy { $0 == "-" || $0.isWhitespace }
@@ -1620,22 +1996,6 @@ struct BrainMarkdownView: View {
         let level = line.prefix { $0 == "#" }.count
         let text = line.dropFirst(level).trimmingCharacters(in: .whitespaces)
         return level > 0 && !text.isEmpty ? (level, text) : nil
-    }
-
-    private func markdownLink(_ line: String) -> (prefix: String, title: String, target: String, suffix: String)? {
-        guard let openBracket = line.firstIndex(of: "["),
-              let closeBracket = line[openBracket...].firstIndex(of: "]"),
-              line.index(after: closeBracket) < line.endIndex,
-              line[line.index(after: closeBracket)] == "(",
-              let closeParen = line[closeBracket...].firstIndex(of: ")")
-        else { return nil }
-        let targetStart = line.index(closeBracket, offsetBy: 2)
-        return (
-            String(line[..<openBracket]),
-            String(line[line.index(after: openBracket)..<closeBracket]),
-            String(line[targetStart..<closeParen]),
-            String(line[line.index(after: closeParen)...])
-        )
     }
 
     private func resolve(_ target: String) -> String {

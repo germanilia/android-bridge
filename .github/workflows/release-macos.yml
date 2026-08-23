@@ -1,85 +1,279 @@
-name: Build latest artifacts
+name: Build and publish release artifacts
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
+    tags: ["v*.*.*"]
 
 permissions:
-  contents: write
-
-concurrency:
-  group: latest-artifacts
-  cancel-in-progress: true
+  contents: read
 
 jobs:
-  build-and-publish:
+  build-and-validate:
     runs-on: macos-15
+    permissions:
+      contents: read
+    concurrency:
+      group: release-build-${{ github.ref }}
+      cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Import stable macOS signing identity
+      - name: Select release channel and validate version
+        shell: bash
+        run: |
+          VERSION="$(python3 scripts/release.py version --root .)"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            python3 scripts/release.py version --root . --check-tag "$TAG"
+            echo "CHANNEL=stable" >> "$GITHUB_ENV"
+            echo "LABEL=$VERSION" >> "$GITHUB_ENV"
+          elif [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            python3 scripts/release.py version --root .
+            echo "CHANNEL=rolling" >> "$GITHUB_ENV"
+            echo "LABEL=latest" >> "$GITHUB_ENV"
+          else
+            echo "Unsupported release ref: $GITHUB_REF" >&2
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Validate protected signing inputs
         env:
-          SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
-          SIGNING_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
+          MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          MACOS_SIGNING_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
+          ANDROID_RELEASE_KEYSTORE_B64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_B64 }}
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          missing=()
+          for name in MACOS_SIGNING_P12 MACOS_SIGNING_PASSWORD ANDROID_RELEASE_KEYSTORE_B64 ANDROID_RELEASE_STORE_PASSWORD ANDROID_RELEASE_KEY_ALIAS ANDROID_RELEASE_KEY_PASSWORD; do
+            [ -n "${!name}" ] || missing+=("$name")
+          done
+          [ "${#missing[@]}" -eq 0 ] || { printf 'Missing required signing secrets: %s\n' "${missing[*]}" >&2; exit 1; }
+
+      - name: Set up Java
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Import temporary signing material
+        env:
+          MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          MACOS_SIGNING_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
+          ANDROID_RELEASE_KEYSTORE_B64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_B64 }}
         shell: bash
         run: |
           KEYCHAIN="$RUNNER_TEMP/android-bridge-signing.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
-          printf '%s' "$SIGNING_P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          printf '%s' "$MACOS_SIGNING_P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/android-release.keystore"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security import "$RUNNER_TEMP/signing.p12" -k "$KEYCHAIN" \
-            -P "$SIGNING_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: \
-            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/signing.p12" -k "$KEYCHAIN" -P "$MACOS_SIGNING_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security list-keychains -d user -s "$KEYCHAIN"
 
-      - name: Build macOS application bundle
-        env:
-          NO_INSTALL: "1"
-          CODESIGN_IDENTITY: "Android Bridge Distribution"
-        run: mac/scripts/make-macos-app.sh
-
-      - name: Build Android APK
-        working-directory: android
-        run: ./gradlew :app:assembleDebug --no-daemon
-
-      - name: Package artifacts and checksums
+      - name: Test release tooling and applications
         shell: bash
         run: |
-          ditto -c -k --sequesterRsrc --keepParent \
-            mac/dist/AndroidBridge.app AndroidBridge-macOS-arm64.zip
-          cp android/app/build/outputs/apk/debug/app-debug.apk AndroidBridge-latest.apk
-          shasum -a 256 AndroidBridge-macOS-arm64.zip \
-            > AndroidBridge-macOS-arm64.zip.sha256
-          shasum -a 256 AndroidBridge-latest.apk \
-            > AndroidBridge-latest.apk.sha256
+          python3 -m unittest scripts/test_release.py
+          swift test --package-path mac
+          (cd android && ./gradlew :app:testDebugUnitTest --no-daemon)
 
-      - name: Publish rolling latest release
+      - name: Build signed macOS application
+        env:
+          NO_INSTALL: "1"
+          EXCLUDE_LOCAL_TOOL_ENV: "1"
+          CODESIGN_IDENTITY: "Android Bridge Distribution"
+          EXPECTED_CODESIGN_REQUIREMENT_FILE: mac/distribution-signing-requirement.txt
+        run: mac/scripts/make-macos-app.sh
+
+      - name: Build release Android APK
+        working-directory: android
+        env:
+          ANDROID_RELEASE_STORE_FILE: ${{ runner.temp }}/android-release.keystore
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: ./gradlew :app:assembleRelease --no-daemon
+
+      - name: Package and verify release artifacts
+        shell: bash
+        run: |
+          mkdir -p release-dist
+          APK="android/app/build/outputs/apk/release/app-release.apk"
+          APKSIGNER="$ANDROID_HOME/build-tools/34.0.0/apksigner"
+          [ -x "$APKSIGNER" ] || { echo "Android build-tools 34 apksigner is unavailable: $APKSIGNER" >&2; exit 1; }
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          signer_output="$("$APKSIGNER" verify --print-certs "$APK")"
+          signer_count="$(printf '%s\n' "$signer_output" | grep -Ec '^Signer #[0-9]+ certificate SHA-256 digest:')"
+          [ "$signer_count" -eq 1 ] || { echo "Expected exactly one APK signer." >&2; exit 1; }
+          signer="$(printf '%s\n' "$signer_output" | awk -F': ' '/^Signer #[0-9]+ certificate SHA-256 digest:/{print $2}' | tr -d ':' | tr 'A-F' 'a-f')"
+          [ "${#signer}" -eq 64 ] || { echo "APK signer SHA-256 is invalid." >&2; exit 1; }
+          cp "$APK" "release-dist/AndroidBridge-${LABEL}-android.apk"
+          bash scripts/make-dmg.sh mac/dist/AndroidBridge.app "release-dist/AndroidBridge-${LABEL}-macOS-arm64.dmg" mac/distribution-signing-requirement.txt
+          if [ "$CHANNEL" = stable ]; then
+            cp "release-dist/AndroidBridge-${LABEL}-macOS-arm64.dmg" release-dist/AndroidBridge-macOS-arm64.dmg
+            cp "release-dist/AndroidBridge-${LABEL}-android.apk" release-dist/AndroidBridge-android.apk
+          fi
+          for artifact in release-dist/*.dmg release-dist/*.apk; do python3 scripts/release.py checksum --path "$artifact"; done
+          printf 'ANDROID_SIGNER=%s\n' "$signer" >> "$GITHUB_ENV"
+
+      - name: Generate macOS SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          file: release-dist/AndroidBridge-${{ env.LABEL }}-macOS-arm64.dmg
+          format: cyclonedx-json
+          output-file: release-dist/AndroidBridge-${{ env.LABEL }}-macOS-arm64.cdx.json
+          syft-version: 1.51.0
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Scan macOS SBOM
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2
+        with:
+          sbom: release-dist/AndroidBridge-${{ env.LABEL }}-macOS-arm64.cdx.json
+          severity-cutoff: high
+          fail-build: true
+          grype-version: 0.117.0
+
+      - name: Generate Android SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          file: release-dist/AndroidBridge-${{ env.LABEL }}-android.apk
+          format: cyclonedx-json
+          output-file: release-dist/AndroidBridge-${{ env.LABEL }}-android.cdx.json
+          syft-version: 1.51.0
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Scan Android SBOM
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2
+        with:
+          sbom: release-dist/AndroidBridge-${{ env.LABEL }}-android.cdx.json
+          severity-cutoff: high
+          fail-build: true
+          grype-version: 0.117.0
+
+      - name: Generate and validate manifest and notes
+        shell: bash
+        run: |
+          python3 scripts/release.py manifest --root . --channel "$CHANNEL" --directory release-dist --android-signer "$ANDROID_SIGNER" --output release-dist/release-manifest.json
+          python3 scripts/release.py notes --root . --channel "$CHANNEL" --commit "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY" --template .github/release-notes-template.md --output release-dist/release-notes.md
+          python3 scripts/release.py validate --root . --channel "$CHANNEL" --directory release-dist --manifest release-dist/release-manifest.json
+
+      - name: Upload validated public release set
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-${{ github.sha }}
+          path: release-dist/
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Remove temporary signing material
+        if: always()
+        shell: bash
+        run: |
+          status=0
+          KEYCHAIN="$RUNNER_TEMP/android-bridge-signing.keychain-db"
+          if [ -e "$KEYCHAIN" ]; then security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || status=1; fi
+          rm -f "$RUNNER_TEMP/signing.p12" "$RUNNER_TEMP/android-release.keystore" || status=1
+          [ "$status" -eq 0 ] || { echo "Temporary credential cleanup failed." >&2; exit 1; }
+
+  publish:
+    needs: build-and-validate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out release validator
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Download validated release set
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-${{ github.sha }}
+          path: release
+
+      - name: Validate downloaded release set
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then CHANNEL=stable; else CHANNEL=rolling; fi
+          python3 scripts/release.py validate --root "$GITHUB_WORKSPACE" --channel "$CHANNEL" --directory release --manifest release/release-manifest.json
+
+      - name: Publish stable release once
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          assets=(
-            AndroidBridge-macOS-arm64.zip
-            AndroidBridge-macOS-arm64.zip.sha256
-            AndroidBridge-latest.apk
-            AndroidBridge-latest.apk.sha256
-          )
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && { echo "Stable release already exists: $tag" >&2; exit 1; }
+          assets=(release/AndroidBridge-* release/release-manifest.json)
+          gh release create "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Android Bridge $tag" --notes-file release/release-notes.md
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets,isDraft,isPrerelease > remote-release.json
+          python3 -c 'import json, pathlib; r=json.load(open("remote-release.json")); expected={p.name:p.stat().st_size for p in pathlib.Path("release").iterdir() if p.name != "release-notes.md"}; actual={a["name"]:a["size"] for a in r["assets"]}; assert not r["isDraft"] and not r["isPrerelease"] and actual == expected'
+          [ "$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)" = "$GITHUB_SHA" ] || { echo "Stable release tag does not resolve to $GITHUB_SHA." >&2; exit 1; }
+
+      - name: Stage and promote rolling release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          staging="latest-build-$GITHUB_SHA"
+          previous="latest-build-previous"
+          moved_previous=0
+          promoted=0
+          delete_tag_ref() {
+            local tag="$1"
+            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag"
+            fi
+          }
+          rollback() {
+            local rollback_failed=0
+            if [ "$promoted" -eq 1 ]; then
+              gh release delete latest-build --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || rollback_failed=1
+              delete_tag_ref latest-build || rollback_failed=1
+            fi
+            if gh release view "$staging" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              gh release delete "$staging" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || rollback_failed=1
+            fi
+            delete_tag_ref "$staging" || rollback_failed=1
+            if [ "$moved_previous" -eq 1 ]; then
+              gh release edit "$previous" --repo "$GITHUB_REPOSITORY" --tag latest-build --target "$previous_sha" --prerelease || rollback_failed=1
+              delete_tag_ref "$previous" || rollback_failed=1
+              [ "$(gh api "repos/$GITHUB_REPOSITORY/commits/latest-build" --jq .sha)" = "$previous_sha" ] || rollback_failed=1
+            fi
+            [ "$rollback_failed" -eq 0 ] || echo "Rolling release rollback failed; manual recovery is required." >&2
+            return "$rollback_failed"
+          }
+          gh release delete "$staging" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes >/dev/null 2>&1 || true
+          assets=(release/AndroidBridge-* release/release-manifest.json)
+          gh release create "$staging" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Android Bridge rolling $GITHUB_SHA" --notes-file release/release-notes.md --draft --prerelease
+          gh release view "$staging" --repo "$GITHUB_REPOSITORY" --json assets,isDraft,isPrerelease,targetCommitish > staged-release.json
+          python3 -c 'import json, pathlib; r=json.load(open("staged-release.json")); expected={p.name:p.stat().st_size for p in pathlib.Path("release").iterdir() if p.name != "release-notes.md"}; actual={a["name"]:a["size"] for a in r["assets"]}; assert r["isDraft"] and r["isPrerelease"] and r["targetCommitish"] == "'"$GITHUB_SHA"'" and actual == expected'
           if gh release view latest-build --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload latest-build "${assets[@]}" \
-              --repo "$GITHUB_REPOSITORY" --clobber
-            gh release edit latest-build --repo "$GITHUB_REPOSITORY" \
-              --title "Android Bridge latest build" \
-              --notes "Automated build from main at $GITHUB_SHA."
+            previous_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/latest-build" --jq .sha)"
+            gh release delete "$previous" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes >/dev/null 2>&1 || true
+            gh release edit latest-build --repo "$GITHUB_REPOSITORY" --tag "$previous" --target "$previous_sha" --prerelease
+            moved_previous=1
+            if ! delete_tag_ref latest-build; then rollback; exit 1; fi
           else
-            gh release create latest-build "${assets[@]}" \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "Android Bridge latest build" \
-              --notes "Automated build from main at $GITHUB_SHA." \
-              --prerelease
+            delete_tag_ref latest-build
           fi
+          promoted=1
+          if ! gh release edit "$staging" --repo "$GITHUB_REPOSITORY" --tag latest-build --target "$GITHUB_SHA" --draft=false --prerelease; then rollback; exit 1; fi
+          if ! delete_tag_ref "$staging"; then rollback; exit 1; fi
+          if ! gh release view latest-build --repo "$GITHUB_REPOSITORY" --json assets,isDraft,isPrerelease > promoted-release.json; then rollback; exit 1; fi
+          if ! python3 -c 'import json, pathlib; r=json.load(open("promoted-release.json")); expected={p.name:p.stat().st_size for p in pathlib.Path("release").iterdir() if p.name != "release-notes.md"}; actual={a["name"]:a["size"] for a in r["assets"]}; assert not r["isDraft"] and r["isPrerelease"] and actual == expected'; then rollback; exit 1; fi
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY/commits/latest-build" --jq .sha)" != "$GITHUB_SHA" ]; then rollback; exit 1; fi
+          [ "$moved_previous" -eq 0 ] || gh release delete "$previous" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes

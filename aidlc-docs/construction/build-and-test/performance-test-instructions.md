@@ -37,6 +37,13 @@ sustaining a smooth frame rate.
   FR-5.4) and that progress is monotonic. The chunk/reassemble correctness is already PBT-covered;
   throughput is the hardware-bound measurement.
 
+## 4. Meeting-stop responsiveness (MCAL1 — manual)
+
+- **Target:** visible recording state clears within one second after Stop.
+- Start a meeting with at least one completed chunk, press Stop, and time until the UI changes from `Recording` to `Finalizing`.
+- While final title/summary work runs, switch tabs, browse another meeting, and start a new short recording. None should wait for the prior finalization queue.
+- Calendar permission/query latency is excluded from local note readiness; it must appear only as passive Calendar status.
+
 ## Status / honesty
 - **Runnable here:** the U1 codec micro-benchmark (CPU-only; the codecs already build and pass tests).
   No benchmark numbers are recorded yet — the harnesses above must be run on target hardware to claim
@@ -44,3 +51,18 @@ sustaining a smooth frame rate.
 - **Not runnable here:** U8 latency and U6 throughput require two real devices, a 5 GHz LAN, and screen
   capture — no phone / second device on this build machine. Targets are documented for a properly
   equipped environment. (Codec micro-benchmarks themselves can run locally.)
+
+## 5. Second Brain visible refresh
+
+- Both visible Brain tabs use a three-second check interval.
+- Mac computes Markdown metadata revision first and skips the Python tree reload when unchanged.
+- Android rescans the granted SAF tree only while the Brain view is visible.
+- Hardware verification should confirm scrolling/editing remains responsive with the current 79-note Mac tree and a comparable phone folder.
+- If refresh exceeds one second on the phone, capture folder size and provider timing before changing the interval or adding indexing.
+
+## 6. Update-path bounds
+
+- Metadata is bounded to 1 MiB and manifests to 64 KiB on both clients.
+- Artifact downloads stream to disk with the manifest byte count as a hard upper bound; full DMG/APK buffering is prohibited.
+- On representative hardware, measure automatic discovery separately from artifact transfer and verify startup remains interactive throughout.
+- CI publication time is observed but not release-gated beyond existing tests, SBOM generation, vulnerability scan, and artifact validation.

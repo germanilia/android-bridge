@@ -14,6 +14,7 @@ public final class MacMeetingRecorder: NSObject, AVAudioRecorderDelegate {
     private let whisper = WhisperTranscriptionService()
     // Serial: chunk transcriptions and the final finalizeMeeting must run in order.
     private let transcriptionQueue = DispatchQueue(label: "com.androidbridge.meeting-transcription", qos: .userInitiated)
+    private let finalizationQueue = DispatchQueue(label: "com.androidbridge.meeting-finalization", qos: .userInitiated)
     public var onUpdate: (() -> Void)?
     /// Called with the finalized notes URL once stop() has flushed every chunk.
     public var onFinished: ((URL) -> Void)?
@@ -30,8 +31,9 @@ public final class MacMeetingRecorder: NSObject, AVAudioRecorderDelegate {
         return nil
     }
 
-    public func stop() {
-        guard !meetingId.isEmpty else { return }
+    @discardableResult
+    public func stop() -> String? {
+        guard !meetingId.isEmpty else { return nil }
         timer?.invalidate()
         timer = nil
         let id = meetingId
@@ -42,10 +44,13 @@ public final class MacMeetingRecorder: NSObject, AVAudioRecorderDelegate {
         // transcript appended afterwards under the old id would recreate a ghost
         // directory and lose the last chunk's text.
         transcriptionQueue.async {
-            let notes = self.store.finalizeMeeting(meetingId: id)
-            self.onUpdate?()
-            self.onFinished?(notes)
+            self.finalizationQueue.async {
+                let notes = self.store.finalizeMeeting(meetingId: id)
+                self.onUpdate?()
+                self.onFinished?(notes)
+            }
         }
+        return id
     }
 
     private func startChunk() -> Bool {

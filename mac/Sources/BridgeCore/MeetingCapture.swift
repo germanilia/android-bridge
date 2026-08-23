@@ -31,9 +31,14 @@ public struct MeetingRecord: Identifiable, Equatable {
     public let questions: String
     public let notesUpdatedAt: Date?
     public let isActive: Bool
+    public let endDate: Date?
+    public let processingState: MeetingProcessingState
+    public let calendarEvent: MeetingCalendarEvent?
 }
 
 public final class MeetingStore {
+    /// Placeholder segment text written when a chunk was saved but Whisper failed.
+    static let untranscribedMarker = "[Audio chunk saved for local transcription: "
     public var rootURL: URL { root }
     public static let shared = MeetingStore()
     private let fm = FileManager.default
@@ -61,6 +66,54 @@ public final class MeetingStore {
     public func markStarted(meetingId: String, startedAtMs: Int) {
         let url = meetingDir(meetingId).appendingPathComponent("startedAt.txt")
         try? String(startedAtMs).write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    @discardableResult
+    public func markEnded(meetingId: String, endedAtMs: Int) -> Bool {
+        write(String(endedAtMs), to: meetingDir(meetingId).appendingPathComponent("endedAt.txt"))
+    }
+
+    @discardableResult
+    public func setProcessingState(meetingId: String, state: MeetingProcessingState) -> Bool {
+        setProcessingState(in: meetingDir(meetingId), state: state)
+    }
+
+    @discardableResult
+    public func setProcessingState(in directory: URL, state: MeetingProcessingState) -> Bool {
+        write(state.rawValue, to: directory.appendingPathComponent("processingState.txt"))
+    }
+
+    @discardableResult
+    public func setCalendarEvent(_ event: MeetingCalendarEvent, for meeting: MeetingRecord) -> Bool {
+        guard let data = try? JSONEncoder().encode(event) else { return false }
+        do {
+            try data.write(to: meeting.url.appendingPathComponent("calendar-event.json"), options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    public func clearCalendarEvent(for meeting: MeetingRecord) {
+        try? fm.removeItem(at: meeting.url.appendingPathComponent("calendar-event.json"))
+    }
+
+    public func hasTitleOverride(_ meeting: MeetingRecord) -> Bool {
+        fm.fileExists(atPath: meeting.url.appendingPathComponent("title.txt").path)
+    }
+
+    public func setTitleOverride(_ meeting: MeetingRecord, to title: String) {
+        let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        guard write(clean, to: meeting.url.appendingPathComponent("title.txt")) else { return }
+        _ = writeNotes(in: meeting.url, meetingId: clean, photos: [], generateSummary: false)
+    }
+
+    public func recoverInterruptedProcessing() {
+        let dirs = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        for dir in dirs where dir.hasDirectoryPath && processingState(in: dir) == .finalizing {
+            _ = write(MeetingProcessingState.needsAttention.rawValue, to: dir.appendingPathComponent("processingState.txt"))
+        }
     }
 
     public func saveAudio(meetingId: String, sequence: Int, data: Data) -> URL {
@@ -106,6 +159,13 @@ public final class MeetingStore {
             return writeNotes(in: destination, meetingId: title, photos: photos, generateSummary: true)
         }
         return writeNotes(in: dir, meetingId: title, photos: photos, generateSummary: true)
+    }
+
+    public func retryFinalization(_ meeting: MeetingRecord) -> URL {
+        if UUID(uuidString: meeting.url.lastPathComponent) != nil {
+            return finalizeMeeting(meetingId: meeting.id)
+        }
+        return writeNotes(in: meeting.url, meetingId: meeting.title, photos: [], generateSummary: true)
     }
 
     private func writeNotes(in dir: URL, meetingId: String, photos: [MeetingPhoto], generateSummary: Bool) -> URL {
@@ -183,13 +243,28 @@ public final class MeetingStore {
     public func retranscribeMeeting(_ meeting: MeetingRecord) {
         let whisper = WhisperTranscriptionService()
         let media = meeting.url.appendingPathComponent("media", isDirectory: true)
-        let marker = "[Audio chunk saved for local transcription: "
-        let segments = readSegments(in: meeting.url).map { segment -> TranscriptSegment in
-            guard segment.text.hasPrefix(marker), segment.text.hasSuffix("]") else { return segment }
-            let name = String(segment.text.dropFirst(marker.count).dropLast())
-            let file = media.appendingPathComponent(name)
-            guard fm.fileExists(atPath: file.path) else { return segment }
-            return whisper.transcribe(file: file, startMs: segment.startMs, endMs: segment.endMs, speaker: segment.speaker)
+        let marker = Self.untranscribedMarker
+        let existing = readSegments(in: meeting.url)
+        let audioFiles = ((try? fm.contentsOfDirectory(at: media, includingPropertiesForKeys: nil)) ?? [])
+            .filter { ["m4a", "3gp", "wav"].contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let segments: [TranscriptSegment]
+        if existing.count < audioFiles.count {
+            // The transcript doesn't even mention every recorded chunk (the
+            // pipeline died mid-meeting) — rebuild it fresh from all audio.
+            // Appending only "unknown" files here would duplicate the chunks
+            // that real segments already cover, since those don't carry names.
+            segments = audioFiles.enumerated().map { index, file in
+                whisper.transcribe(file: file, startMs: index * 60_000, endMs: (index + 1) * 60_000, speaker: "Speaker 1")
+            }
+        } else {
+            segments = existing.map { segment -> TranscriptSegment in
+                guard segment.text.hasPrefix(marker), segment.text.hasSuffix("]") else { return segment }
+                let name = String(segment.text.dropFirst(marker.count).dropLast())
+                let file = media.appendingPathComponent(name)
+                guard fm.fileExists(atPath: file.path) else { return segment }
+                return whisper.transcribe(file: file, startMs: segment.startMs, endMs: segment.endMs, speaker: segment.speaker)
+            }
         }
         let transcriptURL = meeting.url.appendingPathComponent("transcript.jsonl")
         let body = segments.compactMap { segment -> String? in
@@ -213,8 +288,76 @@ public final class MeetingStore {
     public func regenerateSummary(_ meeting: MeetingRecord) {
         let segments = readSegments(in: meeting.url)
         let transcriptText = segments.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.sorted(by: { $0.startMs < $1.startMs }).map { "\($0.speaker): \($0.text)" }.joined(separator: "\n")
-        let summary = currentSummary(in: meeting.url, allowNotesFallback: false) ?? (transcriptText.isEmpty ? nil : LLMService(feature: .summarize).summarize(transcriptText))
+        let summary = transcriptText.isEmpty ? nil : LLMService(feature: .summarize).summarize(transcriptText)
         _ = writeNotesFile(in: meeting.url, meetingId: meeting.title, segments: segments, photos: [], summary: summary)
+    }
+
+    /// A summary counts as missing when there is no summary file for the
+    /// currently selected language/type — so switching the summary language or
+    /// type makes backfill regenerate every meeting for the new preference.
+    /// Meetings whose audio was recorded but never transcribed (placeholder
+    /// segments, or no transcript at all) are re-transcribed first.
+    @discardableResult
+    public func backfillMissingSummaries(
+        force: Bool = false,
+        summarize: (String) -> String? = { LLMService(feature: .summarize).summarize($0) },
+        makeTitle: (String) -> String? = { LLMService(feature: .summarize).title($0) },
+        onProgress: (Int, Int) -> Void = { _, _ in }
+    ) -> (attempted: Int, completed: Int) {
+        let missing = listMeetings().filter { force || readSummary(summaryURL(in: $0.url)) == nil }
+        var attempted = 0
+        var completed = 0
+        for (index, meeting) in missing.enumerated() {
+            onProgress(index + 1, missing.count)
+            let segments = readSegments(in: meeting.url)
+            let transcript = usableTranscript(segments)
+            // Transcript with fewer entries than recorded chunks (or placeholder
+            // entries) means Whisper never covered the meeting — re-transcribe.
+            let needsTranscription = segments.count < meeting.audioFiles.count
+                || segments.contains { $0.text.hasPrefix(Self.untranscribedMarker) }
+            if needsTranscription, !meeting.audioFiles.isEmpty {
+                attempted += 1
+                retranscribeMeeting(meeting)
+                let succeeded = readSummary(summaryURL(in: meeting.url)) != nil
+                setProcessingState(in: meeting.url, state: succeeded ? .ready : .needsAttention)
+                if succeeded { completed += 1 }
+            } else if !transcript.isEmpty {
+                attempted += 1
+                guard let summary = summarize(transcript) else {
+                    setProcessingState(in: meeting.url, state: .needsAttention)
+                    continue
+                }
+                _ = writeNotesFile(in: meeting.url, meetingId: meeting.title, segments: segments, photos: [], summary: summary)
+                setProcessingState(in: meeting.url, state: .ready)
+                completed += 1
+            } else {
+                continue
+            }
+        }
+        // Title pass over ALL meetings (not just the ones missing a summary):
+        // anything still called "Live Meeting"/"Meeting" gets a generated title.
+        for meeting in listMeetings() {
+            backfillTitle(meeting, makeTitle: makeTitle)
+        }
+        return (attempted, completed)
+    }
+
+    /// Gives generic "Live Meeting"/"Meeting" entries a real LLM-generated title.
+    private func backfillTitle(_ meeting: MeetingRecord, makeTitle: (String) -> String?) {
+        guard meeting.title == "Live Meeting" || meeting.title == "Meeting" else { return }
+        let transcript = usableTranscript(readSegments(in: meeting.url))
+        guard !transcript.isEmpty else { return }
+        let title = makeTitle(transcript)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'“”"))
+        guard let title, !title.isEmpty else { return }
+        renameMeeting(meeting, to: title)
+    }
+
+    private func usableTranscript(_ segments: [TranscriptSegment]) -> String {
+        segments.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !$0.text.hasPrefix(Self.untranscribedMarker) }
+            .sorted { $0.startMs < $1.startMs }
+            .map { "\($0.speaker): \($0.text)" }.joined(separator: "\n")
     }
 
     public func renameSpeaker(_ meeting: MeetingRecord, from oldName: String, to newName: String) {
@@ -266,10 +409,9 @@ public final class MeetingStore {
         let media = dir.appendingPathComponent("media", isDirectory: true)
         let mediaFiles = (try? fm.contentsOfDirectory(at: media, includingPropertiesForKeys: nil)) ?? []
         let notes = dir.appendingPathComponent("notes.md")
-        let notesText = (try? String(contentsOf: notes, encoding: .utf8)) ?? ""
         let segments = readSegments(in: dir)
         let transcript = segments.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.map { "\($0.speaker) [\($0.startMs)ms]: \($0.text)" }.joined(separator: "\n")
-        let summary = SummaryRepair.unwrap(notesText.components(separatedBy: "## Transcript").first?.components(separatedBy: "## Summary").last?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+        let summary = currentSummary(in: dir) ?? ""
         let audioFiles = mediaFiles.filter { ["m4a", "3gp", "wav"].contains($0.pathExtension.lowercased()) }.sorted { $0.lastPathComponent < $1.lastPathComponent }
         let imageFiles = mediaFiles.filter { ["jpg", "jpeg", "png"].contains($0.pathExtension.lowercased()) }.sorted { $0.lastPathComponent < $1.lastPathComponent }
         let date = startedDate(in: dir) ?? parsedDate(from: dir.lastPathComponent) ?? ((try? dir.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast)
@@ -295,7 +437,10 @@ public final class MeetingStore {
             summary: summary,
             questions: (try? String(contentsOf: dir.appendingPathComponent("questions.md"), encoding: .utf8)) ?? "",
             notesUpdatedAt: notesUpdatedAt,
-            isActive: activeIds.contains(dir.lastPathComponent)
+            isActive: activeIds.contains(dir.lastPathComponent),
+            endDate: endedDate(in: dir),
+            processingState: activeIds.contains(dir.lastPathComponent) ? .recording : processingState(in: dir),
+            calendarEvent: calendarEvent(in: dir)
         )
     }
 
@@ -306,13 +451,41 @@ public final class MeetingStore {
     }
 
     private func currentSummary(in dir: URL, allowNotesFallback: Bool = true) -> String? {
-        if let cached = try? String(contentsOf: summaryURL(in: dir), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), !cached.isEmpty { return SummaryRepair.unwrap(cached) }
+        let preferred = summaryURL(in: dir)
+        if let cached = readSummary(preferred) { return cached }
+        let summaries = ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [])
+            .filter { $0.lastPathComponent.hasPrefix("summary-") && $0.pathExtension == "md" && $0 != preferred }
+            .sorted { a, b in
+                if a.lastPathComponent == "summary-English-Detailed.md" { return true }
+                if b.lastPathComponent == "summary-English-Detailed.md" { return false }
+                let ad = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let bd = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return ad > bd
+            }
+        for url in summaries {
+            if let summary = readSummary(url) { return summary }
+        }
         guard allowNotesFallback else { return nil }
         let notes = dir.appendingPathComponent("notes.md")
         let text = (try? String(contentsOf: notes, encoding: .utf8)) ?? ""
-        let summary = text.components(separatedBy: "## Transcript").first?.components(separatedBy: "## Summary").last?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let summary = extractSummary(fromNotes: text)
         guard let summary, !summary.isEmpty, !summary.contains("Live transcript is updating") else { return nil }
         return SummaryRepair.unwrap(summary)
+    }
+
+    private func readSummary(_ url: URL) -> String? {
+        guard let text = try? String(contentsOf: url, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+        return SummaryRepair.unwrap(text)
+    }
+
+    private func extractSummary(fromNotes text: String) -> String? {
+        let beforeTranscript = text.components(separatedBy: "## Transcript").first ?? text
+        let markers = ["## Summary", "# Summary", "### Summary", "Summary"]
+        for marker in markers {
+            guard let range = beforeTranscript.range(of: marker) else { continue }
+            return String(beforeTranscript[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return nil
     }
 
     private func summaryURL(in dir: URL) -> URL {
@@ -364,9 +537,36 @@ public final class MeetingStore {
     }
 
     private func startedDate(in dir: URL) -> Date? {
-        let url = dir.appendingPathComponent("startedAt.txt")
+        dateFromMillisecondsFile(dir.appendingPathComponent("startedAt.txt"))
+    }
+
+    private func endedDate(in dir: URL) -> Date? {
+        dateFromMillisecondsFile(dir.appendingPathComponent("endedAt.txt"))
+    }
+
+    private func dateFromMillisecondsFile(_ url: URL) -> Date? {
         guard let raw = try? String(contentsOf: url, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), let ms = Double(raw) else { return nil }
         return Date(timeIntervalSince1970: ms / 1000)
+    }
+
+    private func processingState(in dir: URL) -> MeetingProcessingState {
+        let raw = try? String(contentsOf: dir.appendingPathComponent("processingState.txt"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        return raw.flatMap(MeetingProcessingState.init(rawValue:)) ?? .ready
+    }
+
+    private func calendarEvent(in dir: URL) -> MeetingCalendarEvent? {
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent("calendar-event.json")) else { return nil }
+        return try? JSONDecoder().decode(MeetingCalendarEvent.self, from: data)
+    }
+
+    @discardableResult
+    private func write(_ text: String, to url: URL) -> Bool {
+        do {
+            try text.write(to: url, atomically: true, encoding: .utf8)
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func parsedDate(from name: String) -> Date? {
@@ -489,6 +689,54 @@ public enum LLMFeature: String, CaseIterable, Identifiable {
     public var key: String { rawValue.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "&", with: "And") }
 }
 
+public enum PiInvocation {
+    public static func arguments(model: String, prompt: String) -> [String] {
+        ["--print", "--no-session", "--no-extensions", "--no-tools", "--no-skills", "--model", model, prompt]
+    }
+}
+
+public enum PiModelCatalogError: LocalizedError {
+    case commandFailed(String)
+    case noModels
+
+    public var errorDescription: String? {
+        switch self {
+        case .commandFailed(let message): return message
+        case .noModels: return "pi returned no available models"
+        }
+    }
+}
+
+public enum PiModelCatalog {
+    public static func parse(_ output: String) -> [String] {
+        output.components(separatedBy: .newlines).dropFirst().compactMap { line in
+            let columns = line.split(whereSeparator: { $0.isWhitespace })
+            guard columns.count >= 2 else { return nil }
+            return "\(columns[0])/\(columns[1])"
+        }
+    }
+
+    public static func load(executable: String) throws -> [String] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.environment = environmentWithHomebrewPath()
+        process.arguments = [executable, "--list-models"]
+        let output = Pipe()
+        let errors = Pipe()
+        process.standardOutput = output
+        process.standardError = errors
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let message = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw PiModelCatalogError.commandFailed(message?.isEmpty == false ? message! : "pi --list-models failed")
+        }
+        let models = parse(String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "")
+        guard !models.isEmpty else { throw PiModelCatalogError.noModels }
+        return models
+    }
+}
+
 public struct LLMConfig {
     public let usePi: Bool
     public let model: String
@@ -514,8 +762,8 @@ public struct LLMService {
             ? "Write the summary in the original language of the transcript. If the transcript is mixed-language, use the dominant language."
             : "Write the summary in \(language)."
         let typeInstruction = summaryType == "Short"
-            ? "Write a compact executive summary: decisions, blockers, and action items only."
-            : "Write a clear concise meeting summary, not a transcript rewrite. Focus on confirmed technical/business content. Ignore garbled speech, incidental navigation, UI clicking, repeated phrases, and uncertain fragments unless they affect an action item. Use these sections only: 1) Summary, 2) Decisions, 3) Action Items, 4) Open Questions/Risks. Keep bullets short and concrete. Do not invent context. If something is unclear, put it under Open Questions/Risks instead of expanding it."
+            ? "Write a compact executive summary with Markdown headings for Decisions, Blockers, and Action Items only. Bullet points only, max 15 words per bullet."
+            : "Write a clear concise meeting summary, not a transcript rewrite. Focus on confirmed technical/business content. Ignore garbled speech, incidental navigation, UI clicking, repeated phrases, and uncertain fragments unless they affect an action item. Use these Markdown headings only: ## Summary, ## Decisions, ## Action Items, ## Open Questions/Risks. Under every heading write short '- ' bullet points only — never paragraphs. Max 18 words per bullet, at most 8 bullets under Summary and 6 under each other heading. Do not invent context. If something is unclear, put it under Open Questions/Risks instead of expanding it."
         return run("Summarize the meeting transcript so far. \(languageInstruction) \(typeInstruction) Return clean Markdown only. No code fences. No thinking.\n\nTranscript:\n\(transcript)", feature: feature)
     }
 
@@ -526,8 +774,8 @@ public struct LLMService {
             ? "Keep the summary in the original/dominant transcript language."
             : "Write the summary in \(language)."
         let typeInstruction = summaryType == "Short"
-            ? "Keep it short: decisions, blockers, and action items only."
-            : "Keep the summary clear and concise. Preserve confirmed decisions and action items, add only important new information, and remove noise/repetition. Ignore garbled speech, incidental navigation, UI clicking, and uncertain fragments unless they affect an action item. Use sections: Summary, Decisions, Action Items, Open Questions/Risks."
+            ? "Keep it short with Markdown headings for Decisions, Blockers, and Action Items only. Bullet points only, max 15 words per bullet."
+            : "Keep the summary clear and concise. Preserve confirmed decisions and action items, add only important new information, and remove noise/repetition. Ignore garbled speech, incidental navigation, UI clicking, and uncertain fragments unless they affect an action item. Use Markdown headings: ## Summary, ## Decisions, ## Action Items, ## Open Questions/Risks. Under every heading write short '- ' bullet points only — never paragraphs. Max 18 words per bullet, at most 8 bullets under Summary and 6 under each other heading."
         return run("Update this meeting summary incrementally. \(languageInstruction) \(typeInstruction) Return the complete updated summary as clean Markdown only. No thinking or code fences.\n\nExisting summary:\n\(previous ?? "")\n\nNew transcript chunk:\n\(newTranscript)", feature: feature)
     }
 
@@ -579,8 +827,7 @@ public struct LLMService {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.environment = environmentWithHomebrewPath()
         let pi = UserDefaults.standard.string(forKey: "pi.executable")?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let skill = UserDefaults.standard.string(forKey: "pi.secondBrainSkill")?.trimmingCharacters(in: .whitespacesAndNewlines)
-        process.arguments = [pi?.isEmpty == false ? pi! : "pi", "--print", "--no-session", "--no-skills", "--skill", skill?.isEmpty == false ? skill! : NSHomeDirectory() + "/.agents/skills/second-brain", "--model", model, prompt]
+        process.arguments = [pi?.isEmpty == false ? pi! : "pi"] + PiInvocation.arguments(model: model, prompt: prompt)
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = Pipe()
@@ -606,7 +853,8 @@ public struct LLMService {
 /// spawns internally. Prepend the Homebrew locations explicitly.
 func environmentWithHomebrewPath() -> [String: String] {
     var env = ProcessInfo.processInfo.environment
-    env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
+    let fnm = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/share/fnm/aliases/default/bin").path
+    env["PATH"] = "\(fnm):/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
     return env
 }
 

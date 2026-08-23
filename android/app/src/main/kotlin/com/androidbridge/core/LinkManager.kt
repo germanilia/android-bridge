@@ -13,6 +13,7 @@ import android.net.nsd.NsdManager
 import android.os.Build
 import android.net.nsd.NsdServiceInfo
 import android.os.Environment
+import android.os.SystemClock
 import android.telecom.TelecomManager
 import android.telephony.TelephonyManager
 import android.util.Base64
@@ -25,11 +26,14 @@ import com.androidbridge.android.ClipboardCopyReceiver
 import com.androidbridge.android.MeetingRecorderService
 import com.androidbridge.android.RemoteControlService
 import com.androidbridge.android.ScreenShareService
+import com.androidbridge.feature.ClipboardSyncMode
+import com.androidbridge.feature.ClipboardSyncPolicy
 import com.androidbridge.feature.Mappers
 import com.androidbridge.protocol.Message
 import com.androidbridge.protocol.MessageTypes
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,6 +48,8 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
 import java.security.MessageDigest
+import java.text.DateFormat
+import java.util.Date
 import javax.net.ssl.SSLServerSocket
 import java.util.UUID
 
@@ -76,6 +82,8 @@ class LinkManager(
     val pairedFingerprints: StateFlow<Set<String>> = _pairedFingerprints.asStateFlow()
     private val _lastClipboard = MutableStateFlow<String?>(null)
     val lastClipboard: StateFlow<String?> = _lastClipboard.asStateFlow()
+    private val _clipboardAutoSync = MutableStateFlow(store.get(KEY_CLIPBOARD_AUTO_SYNC) == "true")
+    val clipboardAutoSync: StateFlow<Boolean> = _clipboardAutoSync.asStateFlow()
     private val _events = MutableStateFlow<List<String>>(emptyList())
     val events: StateFlow<List<String>> = _events.asStateFlow()
     private val _peerScreen = MutableStateFlow<Bitmap?>(null)
@@ -88,8 +96,11 @@ class LinkManager(
     val selectedBrainPath: StateFlow<String> = _selectedBrainPath.asStateFlow()
     private val _selectedBrainContent = MutableStateFlow("")
     val selectedBrainContent: StateFlow<String> = _selectedBrainContent.asStateFlow()
-    private val _brainSearchResults = MutableStateFlow<List<SecondBrainNode>>(emptyList())
-    val brainSearchResults: StateFlow<List<SecondBrainNode>> = _brainSearchResults.asStateFlow()
+    private val _brainSearchResults = MutableStateFlow<List<SecondBrainHit>>(emptyList())
+    val brainSearchResults: StateFlow<List<SecondBrainHit>> = _brainSearchResults.asStateFlow()
+    private val _brainConflicts = MutableStateFlow(0)
+    val brainConflicts: StateFlow<Int> = _brainConflicts.asStateFlow()
+    private var brainSearchJob: Job? = null
     private val _brainStatus = MutableStateFlow("")
     val brainStatus: StateFlow<String> = _brainStatus.asStateFlow()
     private val _brainHasFolder = MutableStateFlow(brainFolder.hasFolder())
@@ -105,6 +116,7 @@ class LinkManager(
     private var registrationListener: NsdManager.RegistrationListener? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
     private var incoming: IncomingFile? = null
+    @Volatile private var suppressedClipboard: Pair<String, Long>? = null
 
     private class IncomingFile(val name: String, val size: Int, val buffer: ByteArrayOutputStream = ByteArrayOutputStream())
 
@@ -114,17 +126,18 @@ class LinkManager(
 
     private var notifId = 3000
     /** Post a native Android notification for an inbound peer event (requires POST_NOTIFICATIONS). */
-    private fun notify(title: String, text: String, intent: PendingIntent? = null) {
+    private fun notify(title: String, text: String, intent: PendingIntent? = null, actionLabel: String = "Open") {
         val mgr = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         mgr.createNotificationChannel(NotificationChannel("peer_events", "Peer events", NotificationManager.IMPORTANCE_HIGH))
         val builder = Notification.Builder(context, "peer_events")
             .setContentTitle(title)
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setAutoCancel(true)
         if (intent != null) {
             builder.setContentIntent(intent)
-            builder.addAction(android.R.drawable.ic_menu_view, "Open", intent)
+            builder.addAction(android.R.drawable.ic_menu_view, actionLabel, intent)
         }
         mgr.notify(notifId++, builder.build())
     }
@@ -149,7 +162,8 @@ class LinkManager(
         router.register(MessageTypes.CLIP_UPDATE) { m ->
             val text = field(m, "text")
             _lastClipboard.value = text
-            pushEvent("📋 Clipboard: $text")
+            pushEvent("📋 Clipboard received")
+            notify("Clipboard received", "Tap Copy to use text from your Mac", clipboardCopyIntent(text), "Copy")
         }
         router.register(MessageTypes.NOTIF_POSTED) { m ->
             val t = field(m, "title"); val x = field(m, "text")
@@ -227,6 +241,7 @@ class LinkManager(
      *  never interleave (concurrent writes would corrupt the stream). */
     private suspend fun senderLoop() {
         for (msg in outbox) {
+            while (session == null) delay(250)
             val s = session ?: continue
             runCatching { synchronized(sendLock) { s.send(msg) } }.onFailure {
                 // A dead peer socket must not linger as a zombie session — close it so the
@@ -385,48 +400,125 @@ class LinkManager(
     }
 
     // Feature senders
-    fun sendClipboard(text: String) = send(Mappers.clipboard(text))
-
-    fun setBrainFolder(uri: Uri) {
-        brainFolder.setFolder(uri)
-        _brainHasFolder.value = true
-        _brainFolderName.value = brainFolder.folderName()
-        refreshSecondBrain()
+    fun setClipboardAutoSync(enabled: Boolean) {
+        _clipboardAutoSync.value = enabled
+        store.put(KEY_CLIPBOARD_AUTO_SYNC, enabled.toString())
     }
 
-    fun refreshSecondBrain() {
+    fun suppressNextClipboard(text: String) {
+        suppressedClipboard = text to SystemClock.elapsedRealtime()
+    }
+
+    fun sendClipboard(text: String, userInitiated: Boolean = true) {
+        val suppressed = suppressedClipboard
+        suppressedClipboard = null
+        if (suppressed?.first == text && SystemClock.elapsedRealtime() - suppressed.second < 2_000) return
+        val mode = if (_clipboardAutoSync.value) ClipboardSyncMode.AUTO else ClipboardSyncMode.MANUAL
+        if (!ClipboardSyncPolicy(mode).shouldSend(userInitiated)) return
+        if (text.isEmpty()) { pushEvent("📋 Clipboard is empty"); return }
+        if (text.toByteArray().size > 900_000) { pushEvent("⚠️ Clipboard text is too large; send it as a file"); return }
+        send(Mappers.clipboard(text))
+        pushEvent("📋 Sent clipboard")
+    }
+
+    fun setBrainFolder(uri: Uri) {
+        try {
+            brainFolder.setFolder(uri)
+            _brainHasFolder.value = true
+            _brainFolderName.value = brainFolder.folderName()
+            refreshSecondBrain()
+        } catch (error: Exception) {
+            brainFailure("Folder selection", error)
+        }
+    }
+
+    fun refreshSecondBrain(refreshSelectedContent: Boolean = true) {
         scope.launch(Dispatchers.IO) {
-            val nodes = brainFolder.nodes()
-            _brainNodes.value = nodes
-            _brainStatus.value = "${nodes.count { !it.isDirectory }} notes in ${brainFolder.folderName()}"
+            try {
+                val scan = brainFolder.scan()
+                _brainNodes.value = scan.nodes
+                _brainConflicts.value = scan.conflicts.size
+                val selected = _selectedBrainPath.value
+                if (refreshSelectedContent && selected.isNotEmpty()) {
+                    _selectedBrainContent.value = brainFolder.content(selected)
+                }
+                val refreshed = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date())
+                _brainStatus.value = "${scan.nodes.count { !it.isDirectory }} notes • refreshed $refreshed"
+            } catch (error: Exception) {
+                brainFailure("Refresh", error)
+            }
+        }
+    }
+
+    private fun brainFailure(action: String, error: Exception) {
+        _brainStatus.value = "$action failed. Check Syncthing folder access and try again."
+        LinkLogger.warn("second_brain_failed", mapOf("action" to action, "error" to error::class.java.simpleName))
+    }
+
+    /** Deletes Syncthing conflict copies, accepting the synced (remote-winning) files. */
+    fun resolveBrainConflicts() {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val removed = brainFolder.deleteConflicts()
+                _brainConflicts.value = 0
+                _brainNodes.value = brainFolder.nodes()
+                _brainStatus.value = if (removed == 1) "Removed 1 conflict copy" else "Removed $removed conflict copies"
+            } catch (error: Exception) {
+                brainFailure("Conflict cleanup", error)
+            }
         }
     }
 
     fun selectSecondBrainNode(path: String) {
         _selectedBrainPath.value = path
-        scope.launch(Dispatchers.IO) { _selectedBrainContent.value = brainFolder.content(path) }
+        scope.launch(Dispatchers.IO) {
+            try {
+                _selectedBrainContent.value = brainFolder.content(path)
+            } catch (error: Exception) {
+                brainFailure("Read", error)
+            }
+        }
     }
 
-    fun saveSecondBrainNode(path: String, content: String) {
+    fun saveSecondBrainNode(path: String, content: String, onResult: (Boolean) -> Unit = {}) {
         scope.launch(Dispatchers.IO) {
-            brainFolder.save(path, content)
-            _brainNodes.value = brainFolder.nodes()
-            if (_selectedBrainPath.value == path) _selectedBrainContent.value = content
-            _brainStatus.value = "Saved ${path.substringAfterLast('/')}"
+            try {
+                brainFolder.save(path, content)
+                _brainNodes.value = brainFolder.nodes()
+                if (_selectedBrainPath.value == path) _selectedBrainContent.value = content
+                _brainStatus.value = "Saved ${path.substringAfterLast('/')}"
+                scope.launch(Dispatchers.Main) { onResult(true) }
+            } catch (error: Exception) {
+                brainFailure("Save", error)
+                scope.launch(Dispatchers.Main) { onResult(false) }
+            }
         }
     }
 
     fun deleteSecondBrainNode(path: String) {
-        if (_selectedBrainPath.value == path) { _selectedBrainPath.value = ""; _selectedBrainContent.value = "" }
         scope.launch(Dispatchers.IO) {
-            brainFolder.delete(path)
-            _brainNodes.value = brainFolder.nodes()
-            _brainStatus.value = "Deleted ${path.substringAfterLast('/')}"
+            try {
+                brainFolder.delete(path)
+                if (_selectedBrainPath.value == path) { _selectedBrainPath.value = ""; _selectedBrainContent.value = "" }
+                _brainNodes.value = brainFolder.nodes()
+                _brainStatus.value = "Deleted ${path.substringAfterLast('/')}"
+            } catch (error: Exception) {
+                brainFailure("Delete", error)
+            }
         }
     }
 
+    /** Live search: debounced so typing doesn't re-read the whole folder per keystroke. */
     fun searchSecondBrain(query: String) {
-        scope.launch(Dispatchers.IO) { _brainSearchResults.value = brainFolder.search(query) }
+        brainSearchJob?.cancel()
+        brainSearchJob = scope.launch(Dispatchers.IO) {
+            delay(250)
+            try {
+                _brainSearchResults.value = brainFolder.search(query)
+            } catch (error: Exception) {
+                brainFailure("Search", error)
+            }
+        }
     }
 
     fun sendTestNotification() = send(Mappers.notification("com.demo.app", "Test notification", "Hello from $deviceName", 0))
@@ -587,5 +679,6 @@ class LinkManager(
     companion object {
         const val SERVICE_TYPE = "_androidbridge._tcp."
         private const val KEY_PAIRED = "paired.fingerprints"
+        private const val KEY_CLIPBOARD_AUTO_SYNC = "clipboard.autoSync"
     }
 }

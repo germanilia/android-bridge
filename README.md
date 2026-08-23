@@ -104,17 +104,20 @@ aidlc-docs/    Design notes and implementation records
 > Installing the Mac app to `/Applications` (the default `make-macos-app.sh` behavior) and
 > `adb install` onto a device also require user confirmation.
 
-### One-line macOS installation
+### Install on macOS
 
-Install the latest successful Apple Silicon build from `main`:
+[Download AndroidBridge for Apple Silicon macOS 13+](https://github.com/germanilia/android-bridge/releases/latest/download/AndroidBridge-macOS-arm64.dmg).
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/germanilia/android-bridge/main/install.sh | bash
-```
+Open the DMG, drag `AndroidBridge.app` to Applications, then Control-click the app and choose **Open**
+the first time. The app is not Apple-notarized because this project has no paid Apple Developer account.
+Do not disable Gatekeeper globally.
 
-The installer downloads the rolling `latest-build` release over HTTPS, verifies its SHA-256
-checksum, installs `AndroidBridge.app` into `/Applications`, and launches it. It replaces an existing
-installation and may request administrator privileges when `/Applications` is not writable.
+The Android companion is optional. [Download the release-signed Android 13+ APK](https://github.com/germanilia/android-bridge/releases/latest/download/AndroidBridge-android.apk), then grant Android's normal
+unknown-source/install consent for your browser or file manager.
+
+If you installed the old debug-signed `AndroidBridge-latest.apk` before version 0.1.0, Android cannot
+upgrade it to the release-signed build. Uninstall that old copy once, then install the stable APK. This
+one-time migration removes the old app's local settings and pairing; later stable releases preserve data.
 
 On first launch, the native Setup Wizard detects Homebrew, ffmpeg, Python/MLX Whisper, Ollama,
 `gemma4:e4b`, Node.js, and pi. Existing valid installations are marked complete automatically. For
@@ -123,12 +126,16 @@ is silently installed or replaced. The wizard also guides macOS permissions, pro
 download link for the Android APK, verifies phone connection, and remains available from Settings
 for later repair or reinstallation.
 
-Download the latest debug-signed Android APK from the same rolling release:
+### Advanced command-line installation
 
-[Download AndroidBridge-latest.apk](https://github.com/germanilia/android-bridge/releases/download/latest-build/AndroidBridge-latest.apk)
+The shell installer tracks the rolling `latest-build` prerelease, verifies its checksum, and replaces
+the app only because you explicitly invoke it:
 
-Android may ask you to allow installation from your browser or file manager. Every successful push
-to `main` replaces the macOS archive, APK, and SHA-256 checksums in this rolling release.
+```bash
+curl -fsSL https://raw.githubusercontent.com/germanilia/android-bridge/main/install.sh | bash
+```
+
+See [release maintenance](docs/RELEASING.md) for signing, stable tags, and local non-publishing checks.
 
 ### Prerequisites
 
@@ -163,9 +170,10 @@ cd mac
 ./scripts/make-macos-app.sh
 ```
 
-The script builds a release executable, assembles `mac/dist/AndroidBridge.app`, code-signs it
-(with a self-signed "Code Signing" certificate if one exists in the keychain, otherwise ad-hoc),
-installs it to `/Applications/AndroidBridge.app`, and relaunches it.
+The script builds a release executable, assembles `mac/dist/AndroidBridge.app`, signs it with the
+required local identity, installs it to `/Applications/AndroidBridge.app`, and relaunches it. Set
+`CODESIGN_IDENTITY` explicitly when your stable local identity differs; production signing is documented
+in [release maintenance](docs/RELEASING.md).
 
 To only build the bundle without installing and relaunching:
 
@@ -176,6 +184,21 @@ NO_INSTALL=1 ./scripts/make-macos-app.sh
 Note: the script copies `mac/Tools` (including the MLX Whisper virtualenv, if created) into the
 app bundle, so set up Meetings transcription (below) **before** building the bundle if you want
 transcription to work in the installed app.
+
+### Automatic local deployment on push
+
+Git provides a client-side pre-push hook, not a post-push hook. Activate it once:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+A push targeting remote `main` updates and relaunches the local Mac app before the remote push. It
+also updates one authorized connected phone with a debug APK. Missing `adb`, no authorized phone,
+or multiple phones without `ANDROID_SERIAL` skip Android. Build, signing, or install failures for
+selected targets block the push. Select one of multiple authorized phones with
+`ANDROID_SERIAL=<serial> git push ...`. For an intentional emergency bypass, use
+`git push --no-verify`.
 
 ## Validation
 
