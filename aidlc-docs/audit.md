@@ -1529,3 +1529,11 @@ when I copy text on my mac it shows notifactoinon the phoen can it be transient?
 **Context**: Delivery repair — no release artifact published by the cancelled run. Local package build/sign/install, Python tests, actionlint, YAML, shell syntax, Swift tests, and watcher startup verification passed.
 
 ---
+
+## CI SBOM Tool Tag Repair
+**Timestamp**: 2026-08-23T18:01:45Z
+**User Input**: "so make it ready"
+**AI Response**: "Rolling run 32656129818 passed signing import, all tests, Mac signing, Android release signing, and package verification, then failed closed before publication because the Anchore action resolves exact GitHub tags and `1.51.0` lacked Syft's required `v` prefix. Updated both SBOM jobs to `v1.51.0`, both Grype scans to `v0.117.0`, and pinned their occurrence counts in policy tests."
+**Context**: Delivery repair — no release assets published. Python tests, actionlint, YAML parse, and diff check passed; follow-up commit/push pending.
+
+---

@@ -132,6 +132,8 @@ class RepositoryPolicyTests(unittest.TestCase):
         self.assertIn('EXCLUDE_LOCAL_TOOL_ENV: "1"', workflow)
         self.assertNotIn("security add-trusted-cert", workflow)
         self.assertIn('security find-identity -p codesigning "$KEYCHAIN"', workflow)
+        self.assertEqual(workflow.count("syft-version: v1.51.0"), 2)
+        self.assertEqual(workflow.count("grype-version: v0.117.0"), 2)
         self.assertIn("--output release-dist/release-notes.md", workflow)
         self.assertIn("path: release-dist/", workflow)
         self.assertNotIn("env.CHANNEL ==", workflow)

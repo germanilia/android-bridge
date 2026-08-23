@@ -133,7 +133,7 @@ jobs:
           file: release-dist/AndroidBridge-${{ env.LABEL }}-macOS-arm64.dmg
           format: cyclonedx-json
           output-file: release-dist/AndroidBridge-${{ env.LABEL }}-macOS-arm64.cdx.json
-          syft-version: 1.51.0
+          syft-version: v1.51.0
           upload-artifact: false
           upload-release-assets: false
 
@@ -143,7 +143,7 @@ jobs:
           sbom: release-dist/AndroidBridge-${{ env.LABEL }}-macOS-arm64.cdx.json
           severity-cutoff: high
           fail-build: true
-          grype-version: 0.117.0
+          grype-version: v0.117.0
 
       - name: Generate Android SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
@@ -151,7 +151,7 @@ jobs:
           file: release-dist/AndroidBridge-${{ env.LABEL }}-android.apk
           format: cyclonedx-json
           output-file: release-dist/AndroidBridge-${{ env.LABEL }}-android.cdx.json
-          syft-version: 1.51.0
+          syft-version: v1.51.0
           upload-artifact: false
           upload-release-assets: false
 
@@ -161,7 +161,7 @@ jobs:
           sbom: release-dist/AndroidBridge-${{ env.LABEL }}-android.cdx.json
           severity-cutoff: high
           fail-build: true
-          grype-version: 0.117.0
+          grype-version: v0.117.0
 
       - name: Generate and validate manifest and notes
         shell: bash
