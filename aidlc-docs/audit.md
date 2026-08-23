@@ -1505,3 +1505,11 @@ when I copy text on my mac it shows notifactoinon the phoen can it be transient?
 **Context**: CONSTRUCTION Build and Test complete locally. Swift 51 XCTest tests plus property checks passed; Android unit tests/debug build/release build passed; release tooling, shell, YAML, actionlint, hook tests, and diff checks passed. Independent reviewer blocker led to Mac code-signature/designated-requirement validation before open; metadata downloads now stream within bounds. Old debug-signed Android install migration is documented. Gitleaks found one reviewed false positive in existing IdentityKit type declaration and no embedded secret. Delivery pending commit/push/CI/releases.
 
 ---
+
+## Rolling CI Signing-Trust Repair
+**Timestamp**: 2026-08-23T16:48:07Z
+**User Input**: "so make it ready"
+**AI Response**: "Committed and pushed `fbb005e` to main without rewriting history. The local pre-push hook rebuilt, installed, and relaunched the Mac app; Android correctly skipped because no phone remained connected. GitHub Actions run 32652422881 passed tests and secret import but failed because the imported self-signed Mac certificate was not trusted in the temporary CI keychain, so `security find-identity -v` excluded it. Added explicit trust-root import into that temporary keychain, early identity validation, cleanup of the extracted public certificate, and workflow policy coverage."
+**Context**: Delivery repair — first rolling run failed closed before artifact publication. No partial rolling release was published. Repair validated by Python tests, actionlint, YAML parse, and diff check; follow-up commit/push pending.
+
+---
