@@ -140,6 +140,8 @@ class RepositoryPolicyTests(unittest.TestCase):
         self.assertIn('gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha', workflow)
         self.assertIn('gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag"', workflow)
         self.assertIn("delete_tag_ref latest-build", workflow)
+        self.assertIn('gh api "repos/$GITHUB_REPOSITORY/releases/$staging_id" > staged-release.json', workflow)
+        self.assertIn('--method PATCH "repos/$GITHUB_REPOSITORY/releases/$staging_id"', workflow)
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         requirement = 'identifier "com.androidbridge.mac" and certificate leaf = H"ef2fb966bb80189b6e12ef4a9111601f4d8466ec"'
         self.assertIn(requirement, installer)

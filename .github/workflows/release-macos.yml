@@ -233,6 +233,7 @@ jobs:
           previous="latest-build-previous"
           moved_previous=0
           promoted=0
+          staging_id=""
           delete_tag_ref() {
             local tag="$1"
             if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
@@ -241,12 +242,11 @@ jobs:
           }
           rollback() {
             local rollback_failed=0
-            if [ "$promoted" -eq 1 ]; then
-              gh release delete latest-build --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || rollback_failed=1
-              delete_tag_ref latest-build || rollback_failed=1
+            if [ -n "$staging_id" ]; then
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$staging_id" || rollback_failed=1
             fi
-            if gh release view "$staging" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-              gh release delete "$staging" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || rollback_failed=1
+            if [ "$promoted" -eq 1 ]; then
+              delete_tag_ref latest-build || rollback_failed=1
             fi
             delete_tag_ref "$staging" || rollback_failed=1
             if [ "$moved_previous" -eq 1 ]; then
@@ -257,11 +257,15 @@ jobs:
             [ "$rollback_failed" -eq 0 ] || echo "Rolling release rollback failed; manual recovery is required." >&2
             return "$rollback_failed"
           }
-          gh release delete "$staging" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes >/dev/null 2>&1 || true
+          for release_id in $(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$staging\") | .id"); do
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$release_id"
+          done
           assets=(release/AndroidBridge-* release/release-manifest.json)
           gh release create "$staging" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Android Bridge rolling $GITHUB_SHA" --notes-file release/release-notes.md --draft --prerelease
-          gh release view "$staging" --repo "$GITHUB_REPOSITORY" --json assets,isDraft,isPrerelease,targetCommitish > staged-release.json
-          python3 -c 'import json, pathlib; r=json.load(open("staged-release.json")); expected={p.name:p.stat().st_size for p in pathlib.Path("release").iterdir() if p.name != "release-notes.md"}; actual={a["name"]:a["size"] for a in r["assets"]}; assert r["isDraft"] and r["isPrerelease"] and r["targetCommitish"] == "'"$GITHUB_SHA"'" and actual == expected'
+          staging_id="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$staging\") | .id")"
+          [[ "$staging_id" =~ ^[0-9]+$ ]] || { echo "Draft release ID is invalid: $staging_id" >&2; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/releases/$staging_id" > staged-release.json
+          python3 -c 'import json, pathlib; r=json.load(open("staged-release.json")); expected={p.name:p.stat().st_size for p in pathlib.Path("release").iterdir() if p.name != "release-notes.md"}; actual={a["name"]:a["size"] for a in r["assets"]}; assert r["draft"] and r["prerelease"] and r["target_commitish"] == "'"$GITHUB_SHA"'" and actual == expected'
           if gh release view latest-build --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             previous_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/latest-build" --jq .sha)"
             gh release delete "$previous" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes >/dev/null 2>&1 || true
@@ -272,9 +276,8 @@ jobs:
             delete_tag_ref latest-build
           fi
           promoted=1
-          if ! gh release edit "$staging" --repo "$GITHUB_REPOSITORY" --tag latest-build --target "$GITHUB_SHA" --draft=false --prerelease; then rollback; exit 1; fi
+          if ! gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$staging_id" -f tag_name=latest-build -f target_commitish="$GITHUB_SHA" -F draft=false -F prerelease=true > promoted-release.json; then rollback; exit 1; fi
           if ! delete_tag_ref "$staging"; then rollback; exit 1; fi
-          if ! gh release view latest-build --repo "$GITHUB_REPOSITORY" --json assets,isDraft,isPrerelease > promoted-release.json; then rollback; exit 1; fi
-          if ! python3 -c 'import json, pathlib; r=json.load(open("promoted-release.json")); expected={p.name:p.stat().st_size for p in pathlib.Path("release").iterdir() if p.name != "release-notes.md"}; actual={a["name"]:a["size"] for a in r["assets"]}; assert not r["isDraft"] and r["isPrerelease"] and actual == expected'; then rollback; exit 1; fi
+          if ! python3 -c 'import json, pathlib; r=json.load(open("promoted-release.json")); expected={p.name:p.stat().st_size for p in pathlib.Path("release").iterdir() if p.name != "release-notes.md"}; actual={a["name"]:a["size"] for a in r["assets"]}; assert not r["draft"] and r["prerelease"] and actual == expected'; then rollback; exit 1; fi
           if [ "$(gh api "repos/$GITHUB_REPOSITORY/commits/latest-build" --jq .sha)" != "$GITHUB_SHA" ]; then rollback; exit 1; fi
           [ "$moved_previous" -eq 0 ] || gh release delete "$previous" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
