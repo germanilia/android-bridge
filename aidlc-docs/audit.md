@@ -1521,3 +1521,11 @@ when I copy text on my mac it shows notifactoinon the phoen can it be transient?
 **Context**: Debugging — root cause confirmed from source, installed signature, recent meeting filesystem state, and diagnostic history. No temporary instrumentation added.
 
 ---
+
+## CI Self-Signed Identity Selection Repair
+**Timestamp**: 2026-08-23T17:47:25Z
+**User Input**: "so make it ready"
+**AI Response**: "Follow-up run 32652866326 hung while `security add-trusted-cert` awaited trust authorization in the temporary runner keychain and was cancelled. Trusting the self-signed certificate is unnecessary for signing. Changed CI and the package script to enumerate all code-signing identities without `-v` (which filters out untrusted self-signed identities), while preserving exact designated-requirement verification after signing. Removed the trust mutation and updated policy tests."
+**Context**: Delivery repair — no release artifact published by the cancelled run. Local package build/sign/install, Python tests, actionlint, YAML, shell syntax, Swift tests, and watcher startup verification passed.
+
+---

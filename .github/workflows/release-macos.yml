@@ -77,12 +77,9 @@ jobs:
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security import "$RUNNER_TEMP/signing.p12" -k "$KEYCHAIN" -P "$MACOS_SIGNING_PASSWORD" -T /usr/bin/codesign
-          security find-certificate -c "Android Bridge Distribution" -p "$KEYCHAIN" > "$RUNNER_TEMP/signing-cert.pem"
-          test -s "$RUNNER_TEMP/signing-cert.pem"
-          security add-trusted-cert -r trustRoot -k "$KEYCHAIN" "$RUNNER_TEMP/signing-cert.pem"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security list-keychains -d user -s "$KEYCHAIN"
-          security find-identity -v -p codesigning "$KEYCHAIN" | grep -qi "Android Bridge Distribution"
+          security find-identity -p codesigning "$KEYCHAIN" | grep -qi "Android Bridge Distribution"
 
       - name: Test release tooling and applications
         shell: bash
@@ -188,7 +185,7 @@ jobs:
           status=0
           KEYCHAIN="$RUNNER_TEMP/android-bridge-signing.keychain-db"
           if [ -e "$KEYCHAIN" ]; then security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || status=1; fi
-          rm -f "$RUNNER_TEMP/signing.p12" "$RUNNER_TEMP/signing-cert.pem" "$RUNNER_TEMP/android-release.keystore" || status=1
+          rm -f "$RUNNER_TEMP/signing.p12" "$RUNNER_TEMP/android-release.keystore" || status=1
           [ "$status" -eq 0 ] || { echo "Temporary credential cleanup failed." >&2; exit 1; }
 
   publish:

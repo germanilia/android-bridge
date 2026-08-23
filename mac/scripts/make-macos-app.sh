@@ -65,7 +65,7 @@ PLIST
 # must survive updates. Other machines can provide CODESIGN_IDENTITY explicitly.
 DEFAULT_CODESIGN_IDENTITY="A0B15CA62926F788FFFC550CA7A7737AA64C7699"
 IDENTITY="${CODESIGN_IDENTITY:-$DEFAULT_CODESIGN_IDENTITY}"
-if ! security find-identity -v -p codesigning | grep -qi "$IDENTITY"; then
+if ! security find-identity -p codesigning | grep -qi "$IDENTITY"; then
     echo "✗ Required code-signing identity is unavailable: $IDENTITY" >&2
     echo "  Set CODESIGN_IDENTITY to the stable identity previously used for this app." >&2
     exit 1
