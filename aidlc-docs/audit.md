@@ -1513,3 +1513,11 @@ when I copy text on my mac it shows notifactoinon the phoen can it be transient?
 **Context**: Delivery repair — first rolling run failed closed before artifact publication. No partial rolling release was published. Repair validated by Python tests, actionlint, YAML parse, and diff check; follow-up commit/push pending.
 
 ---
+
+## Missing Automatic Meeting Recordings Investigation
+**Timestamp**: 2026-08-23T17:42:32Z
+**User Input**: "I had several meeetings today which were not recoreded something is not working proeprly maybe missing permissions, due to signature changets"
+**AI Response**: "Confirmed the installed app is valid and still uses the unchanged local designated requirement `identifier com.androidbridge.mac` with certificate SHA-1 A0B15CA62926F788FFFC550CA7A7737AA64C7699. The app bundle still contains Microphone and Screen Capture usage descriptions. No meeting directories were created today. Root cause: `startAutoMeetingWatch()` remained implemented but was no longer called by `LinkManager.start()`, so automatic meeting detection never ran. Restoring the watcher without an automatic Screen Recording permission request; macOS 14.4+ microphone-process detection remains primary and manual recording remains available."
+**Context**: Debugging — root cause confirmed from source, installed signature, recent meeting filesystem state, and diagnostic history. No temporary instrumentation added.
+
+---

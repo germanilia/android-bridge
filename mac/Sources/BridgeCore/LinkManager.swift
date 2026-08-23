@@ -185,6 +185,7 @@ public final class LinkManager: ObservableObject {
         requestNotificationAuthorization()
         startBrowser()
         startClipboardWatch()
+        startAutoMeetingWatch()
         setStatus(.discovering)
     }
 
@@ -198,10 +199,7 @@ public final class LinkManager: ObservableObject {
 
     private func startAutoMeetingWatch() {
         DispatchQueue.main.async {
-            if !CGPreflightScreenCaptureAccess() {
-                _ = CGRequestScreenCaptureAccess()
-                self.pushEvent("⚠️ Allow Screen Recording once, then relaunch Android Bridge; future signed updates preserve it")
-            }
+            self.dbg("AUTO_MEETING watcher started")
             Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in self?.pollVideoMeeting() }
         }
     }
