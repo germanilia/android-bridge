@@ -68,9 +68,9 @@ X) Other (please describe after [Answer]: tag below)
 ## Question 6
 Which local transcription implementation should we integrate first?
 
-A) Use the discovered local MLX Whisper CLI at `/Users/iliagerman/Work/personal_projects/video_translator/.venv-mlx/bin/mlx_whisper`
+A) Use the discovered local MLX Whisper CLI at `<local-source-project>/.venv-mlx/bin/mlx_whisper`
 
-B) Use the discovered Python script at `/Users/iliagerman/Work/personal_projects/video_translator/scripts/asr_mlx.py`
+B) Use the discovered Python script at `<local-source-project>/scripts/asr_mlx.py`
 
 C) Treat Whisper as an external configurable command in Mac settings, with one of the discovered implementations as the default
 

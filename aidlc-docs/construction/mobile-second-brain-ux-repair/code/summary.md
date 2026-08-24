@@ -12,7 +12,7 @@
 
 ## Verification
 - Android unit tests: passed, including six Second Brain navigation/refresh tests.
-- Debug APK: assembled and installed with `adb install -r` on Pixel 9a `62051JEBF07522`.
+- Debug APK: assembled and installed with `adb install -r` on Pixel 9a `<device-serial>`.
 - Installed package: `versionName=0.1.1`, `versionCode=1001`; process launched without a fatal exception.
 - Existing Second Brain folder preference remained present after the update.
 - Release APK: assembled, APK Signature Scheme v2 verified, signer SHA-256 `108b8f8ac860041b0845c9c426cfe7125c8e99899cde031791359a180f233410`.

@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apps:
+    name: Apps and protocol
+    runs-on: macos-15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Set up Java
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Validate version metadata
+        run: python3 scripts/release.py version --root .
+
+      - name: Test release tooling
+        run: python3 -m unittest scripts/test_release.py
+
+      - name: Test macOS app and Swift protocol
+        run: |
+          swift test --package-path mac
+          swift test --package-path protocol/swift
+
+      - name: Test Android app and Kotlin protocol
+        working-directory: android
+        run: |
+          ./gradlew :protocol:test --no-daemon
+          ./gradlew :app:testDebugUnitTest --no-daemon
+
+      - name: Build debug Android APK
+        working-directory: android
+        run: ./gradlew :app:assembleDebug --no-daemon
+
+  relay:
+    name: Relay server
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Set up Java
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Test relay
+        working-directory: relay
+        run: ./gradlew test --no-daemon
+
+      - name: Build relay container image
+        working-directory: relay
+        run: docker build -t android-bridge-relay:ci .

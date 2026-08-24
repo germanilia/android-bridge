@@ -3,7 +3,7 @@
 ## Project
 - **Name**: android_bridge
 - **Description**: All-in-one continuity hub between Samsung Galaxy (Android) and Mac (Apple Silicon) — SMS/messages, notifications, file drag-and-drop, clipboard, screen mirroring/control, and phone calls — the Android↔Mac equivalent of Apple Continuity.
-- **Workspace Root**: /Users/iliagerman/Work/personal_projects/android_bridge
+- **Workspace Root**: <workspace-root>
 
 ## Workspace State
 - **Existing Code**: Yes — native Android app, native macOS app, and shared protocol implementations exist.
@@ -29,6 +29,9 @@
 | Security Baseline (direct distribution packaging) | Yes | Requirements Analysis |
 | Resiliency Baseline (direct distribution packaging) | No | Requirements Analysis |
 | Property-Based Testing (direct distribution packaging) | No | Requirements Analysis |
+| Security Baseline (in-app sync relay) | No — minimum private-relay safety boundary retained | Requirements Analysis |
+| Resiliency Baseline (in-app sync relay) | No | Requirements Analysis |
+| Property-Based Testing (in-app sync relay) | Yes — full | Requirements Analysis |
 
 ## Stage Progress
 ### 🔵 INCEPTION PHASE
@@ -68,6 +71,7 @@ Executed autonomously (user away; recommended defaults taken). Approval gates re
 - [ ] Operations (placeholder)
 
 ### 🔁 POST-CONSTRUCTION FEATURE INCREMENTS
+- [ ] In-app home-server sync relay — `0.2.0` implementation complete; final signed builds, device installation, cross-network homeserver verification, CI, and publication remain. Direct LAN stays preferred with optional WSS fallback. Endpoint-local durable journals resume protocol messages, files, clipboard, meetings, phone audio transfer, Second Brain Markdown, and meeting photos; live controls never replay. The stateless private relay stores credential/pair configuration but no forwarded payload. Full Kotlin/Swift/Ktor model, journal, conflict, restart, PBT, and build suites pass. Requirements: `aidlc-docs/inception/requirements/in-app-sync-relay-requirements.md`.
 - [ ] Mobile Brain polish and meeting content sync — shipped publicly as `v0.1.2`. Brain is embedded in the normal tab shell; Meetings combines in-person capture and mirrored past meetings; Mac mirrors text-only meeting content through Second Brain/Syncthing while audio remains in place. Android/Swift tests, release signing, 66-meeting backfill, zero-media/path checks, rolling/stable CI, and public links passed. The final signer-compatible build is installed on the Pixel with Second Brain state preserved; only an unlocked screenshot remains. Summary: `aidlc-docs/construction/mobile-brain-polish-meeting-sync/code/summary.md`.
 - [x] Mobile Second Brain UX repair — full-screen navigation, dirty-edit protection, single-flight refresh, search refresh, and safe note loading shipped in `v0.1.1`. Unit tests, debug/release builds, release signing, in-place Pixel 9a deployment, rolling CI, stable publication, public download links, manifest, and signer checks passed. Unlocked-device visual verification remains manual because the phone stayed behind its PIN keyguard. Summary: `aidlc-docs/construction/mobile-second-brain-ux-repair/code/summary.md`.
 - [x] Local main-push deployment hook — tracked `.githooks/pre-push` updates/signs/installs/relaunches the Mac app and updates one authorized connected Android device with `adb install -r`; absent or ambiguous Android targets skip. Fake-command tests, shell syntax, and ShellCheck pass. Repository-local `core.hooksPath=.githooks` is active.

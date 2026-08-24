@@ -18,7 +18,7 @@
 | Offline behavior | If disconnected, keep recording locally on phone, queue chunks, and upload after reconnect. |
 | Phone retention | Do not keep anything on the phone after successful Mac transfer/confirmation. |
 | Mac retention | User decides whether to save or delete raw audio/images from the Mac. |
-| Whisper integration | Import/localize the discovered MLX Whisper CLI implementation into this project; do not depend on the other project path. Source candidate: `/Users/iliagerman/Work/personal_projects/video_translator/.venv-mlx/bin/mlx_whisper`. |
+| Whisper integration | Import/localize the discovered MLX Whisper CLI implementation into this project; do not depend on the other project path. Source candidate: `<local-source-project>/.venv-mlx/bin/mlx_whisper`. |
 | Speaker detection | v1 supports diarization labels and lets the user rename speakers after the meeting; notes update with renamed speakers. |
 | Summarization | v1 stays local-first and can later allow configured cloud LLM. Use Ollama with available Gemma model. `ollama ls` found `gemma4:e4b` / `gemma4:latest` (same ID). |
 | Output format | Markdown folder: `notes.md` plus media attachments with timestamps. |
@@ -153,8 +153,8 @@ Payloads must be schema-validated and size-bounded before processing.
   - `gemma4:e4b` — 9.6 GB
   - `gemma4:latest` — same model ID
 - Local Whisper candidates found:
-  - `/Users/iliagerman/Work/personal_projects/video_translator/.venv-mlx/bin/mlx_whisper`
-  - `/Users/iliagerman/Work/personal_projects/video_translator/scripts/asr_mlx.py`
+  - `<local-source-project>/.venv-mlx/bin/mlx_whisper`
+  - `<local-source-project>/scripts/asr_mlx.py`
   - `/Applications/TypeWhisper.app`
 
 ## Open Items for Design

@@ -29,4 +29,4 @@
 - Public latest DMG and APK URLs returned HTTP 200.
 
 ## Device Deployment
-The final `0.1.2` debug-signed build was installed in place on Pixel 9a `62051JEBF07522`. Package inspection confirmed version code `1002`; the existing Second Brain tree URI and 52 cached nodes were preserved. The phone remained PIN-locked, so final screenshot comparison is still pending.
+The final `0.1.2` debug-signed build was installed in place on Pixel 9a `<device-serial>`. Package inspection confirmed version code `1002`; the existing Second Brain tree URI and 52 cached nodes were preserved. The phone remained PIN-locked, so final screenshot comparison is still pending.

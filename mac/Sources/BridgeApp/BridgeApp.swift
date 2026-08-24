@@ -781,9 +781,18 @@ struct MeetingPreview: View {
                                 }
                             }
                         } else {
-                            FormattedNoteText(text: meeting.summary)
-                                .frame(maxWidth: 760, alignment: .leading)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Spacer(minLength: 0)
+                                    Button { copy(meeting.summary) } label: {
+                                        Label("Copy summary", systemImage: "doc.on.doc")
+                                    }
+                                    .help("Copy the whole summary. You can also click the text and press ⌘A then ⌘C.")
+                                }
+                                SelectableNoteText(text: meeting.summary)
+                                    .frame(maxWidth: 760, alignment: .leading)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     } else if noteTab == "Transcript" {
                         Text(meeting.transcript.isEmpty ? "Transcript is still empty." : meeting.transcript)
@@ -867,8 +876,6 @@ struct MeetingPreview: View {
                 .labelsHidden()
                 .pickerStyle(.segmented)
                 .frame(width: 150)
-                Button("Copy summary") { copy(meeting.summary) }
-                    .disabled(meeting.summary.isEmpty)
                 if link.regeneratingSummaryIds.contains(meeting.id) {
                     ProgressView().controlSize(.small)
                     Text("Regenerating…").font(.caption).foregroundStyle(.secondary)
@@ -1140,7 +1147,7 @@ struct FormattedCell: View {
     }
 }
 
-private extension String {
+extension String {
     var isMostlyHebrew: Bool {
         let letters = unicodeScalars.filter { CharacterSet.letters.contains($0) }
         guard !letters.isEmpty else { return false }

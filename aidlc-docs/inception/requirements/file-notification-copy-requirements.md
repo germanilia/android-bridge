@@ -12,7 +12,7 @@ When a received-file toast contains an `openFile` action and saved-file `path`, 
 Example expected value:
 
 ```text
-/Users/iliagerman/Library/Caches/AndroidBridge/Received/Screenshot_20260813-194228.png
+~/Library/Caches/AndroidBridge/Received/Screenshot_20260813-194228.png
 ```
 
 Other toast types must continue copying their visible message text.

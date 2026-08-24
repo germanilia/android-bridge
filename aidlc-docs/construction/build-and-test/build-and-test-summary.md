@@ -61,7 +61,7 @@ integration instructions.
 - **Build**: `cd mac && swift build` passed.
 - **Deployment**: Release app built with `android-bridge`, installed to `/Applications/AndroidBridge.app`, and relaunched successfully.
 - **Artifact identity**: Built and installed executable SHA-256 values match.
-- **Manual hardware check**: Send another file from the phone and click Copy; the pasteboard should contain `/Users/iliagerman/Library/Caches/AndroidBridge/Received/<filename>`.
+- **Manual hardware check**: Send another file from the phone and click Copy; the pasteboard should contain `~/Library/Caches/AndroidBridge/Received/<filename>`.
 - **Known packaging warning**: Strict code-sign verification reports the pre-existing absolute Python symlink inside the bundled MLX Whisper virtual environment. App launch and this bug fix are unaffected.
 
 ---
@@ -116,7 +116,7 @@ integration instructions.
 - **Static checks:** `git diff --check`, Markdown/content validation, privacy-log search, and temporary-debug-marker search passed.
 - **Deployment:** signed Mac app installed and relaunched with unchanged designated requirement.
 - **Mac artifact identity:** built and installed executable SHA-256 values match `3f68f2d7714325217ce554ea1a64702b98726e405a676d600d953e5f771bfc15`.
-- **Android deployment:** APK installed with `adb install -r` on Pixel 9a `62051JEBF07522`; app relaunched and no recent AndroidRuntime crash was present.
+- **Android deployment:** APK installed with `adb install -r` on Pixel 9a `<device-serial>`; app relaunched and no recent AndroidRuntime crash was present.
 - **Pending:** live two-device clipboard and Second Brain verification.
 
 ---

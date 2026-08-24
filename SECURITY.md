@@ -4,12 +4,16 @@ Android Bridge is a local-first continuity app. Security reports are welcome.
 
 ## Supported versions
 
-The `main` branch is the active development line.
+Only the latest published release receives fixes. The `main` branch is the active development line.
+Older tags are not patched — upgrade before reporting an issue against an old build.
 
 ## Reporting a vulnerability
 
-Please open a private security advisory on GitHub if available, or contact the maintainer directly.
-Do not publish exploit details before there is a fix or mitigation.
+Report privately through GitHub:
+<https://github.com/germanilia/android-bridge/security/advisories/new>
+
+Expect an acknowledgement within 7 days. Please do not publish exploit details before there is a fix
+or a documented mitigation.
 
 ## Security expectations
 

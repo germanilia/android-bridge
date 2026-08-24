@@ -2,7 +2,7 @@
 
 Android Bridge is an open-source, local-first continuity app for **Android ↔ macOS**.
 It brings the everyday convenience of Apple Continuity to an Android phone and a Mac without accounts,
-cloud relays, or vendor lock-in.
+vendor-operated services, or lock-in. An optional relay for off-network use is self-hosted and off by default.
 
 The two apps discover each other on the local network, pair by pinning certificate fingerprints, and communicate over TLS.
 Current production transport uses pinned server-authenticated TLS; full mutual TLS/client-certificate verification is planned hardening.
@@ -36,13 +36,19 @@ The Mac app also includes local-only productivity tools that work without a phon
 - **Second Brain on Mac**
   - Browse, read, search, edit, create, delete, and chat with notes in `BRAIN_ROOT` (defaults to `~/second_brain`).
   - pi-backed second-brain actions launch pi with only the second-brain skill loaded; local Ollama remains the default.
-- **Second Brain on Android (via Syncthing)**
-  - The phone views and edits the same Markdown notes from a Syncthing-synced folder (granted once via the folder picker).
-  - Sync is handled by Syncthing — with an always-on home-server node over Tailscale — not the device link. See [`aidlc-docs/inception/decisions/second-brain-syncthing.md`](aidlc-docs/inception/decisions/second-brain-syncthing.md).
+- **Second Brain on Android**
+  - The phone views and edits the same Markdown notes from a user-granted local folder.
+  - Syncthing remains supported. When the optional relay is enabled, hash-based Markdown and meeting-photo deltas also resume directly between the apps and preserve conflicting edits.
 - **Local-first encrypted transport**
-  - No backend service.
-  - No account.
-  - TLS with pinned certificate validation between paired devices.
+  - No account, and no vendor-operated service.
+  - On the local network, TLS with pinned certificate validation between paired devices.
+- **Optional self-hosted relay (experimental)**
+  - Lets the devices reach each other when they are not on the same network.
+  - Off by default. You must enable it and enroll the device yourself.
+  - You run the relay (`relay/`); there is no service operated by this project. See [`docs/RELAY.md`](docs/RELAY.md).
+  - **The relay terminates TLS and can read the frames it forwards.** Application payloads are not
+    yet end-to-end encrypted across it. It does not store forwarded frames. Only enable it on a
+    relay you operate and trust.
 - **Mac login item**
   - The Mac app can start automatically on login.
 
@@ -87,6 +93,7 @@ protocol/      Shared Device-Link Protocol — wire contract and codecs
   vectors/     Cross-language wire vectors
 android/       Android app, Kotlin, Jetpack Compose, Gradle
 mac/           macOS menu-bar app, SwiftUI/AppKit, SwiftPM
+relay/         Optional self-hosted relay server, Kotlin/Ktor, Docker
 aidlc-docs/    Design notes and implementation records
 ```
 
@@ -303,7 +310,11 @@ Android Bridge is designed for a trusted local network and paired devices:
 - Pairing records the peer certificate fingerprint.
 - Runtime communication uses TLS with pinned certificate validation.
 - Current production transport is pinned server-authenticated TLS; full mutual TLS/client-certificate verification is planned future hardening.
-- There is no cloud relay and no central account.
+- There is no central account and no service operated by this project.
+- The optional relay in `relay/` is self-hosted and off by default. It terminates TLS, so its
+  operator can observe forwarded clipboard, message, file, and meeting payloads; they are not yet
+  end-to-end encrypted across the relay. The relay does not persist forwarded frames. Treat it as
+  experimental and only run it yourself.
 - Received files on Mac are kept in a temporary cache and auto-cleaned.
 
 See [`aidlc-docs/SECURITY-COMMUNICATION-DECISION.md`](aidlc-docs/SECURITY-COMMUNICATION-DECISION.md)
