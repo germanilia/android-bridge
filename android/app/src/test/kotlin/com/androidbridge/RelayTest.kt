@@ -295,6 +295,27 @@ class RelayWebSocketTransportTest : StringSpec({
         }
     }
 
+    "transport keeps waiting when relay reports peer absent" {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
+                webSocket.send("{\"error\":\"peer_absent\"}")
+            }
+        }))
+        server.start()
+        try {
+            val transport = RelayWebSocketTransport()
+            transport.connectAt(server.url("/v1/connect"), RelayCredentials("android-1", "credential-1"), generation = 8)
+            runBlocking {
+                withTimeout(3_000) {
+                    while (transport.events.receive() !is RelayEvent.Waiting) Unit
+                }
+            }
+        } finally {
+            server.shutdown()
+        }
+    }
+
     "transport rejects oversized outbound frame" {
         val transport = RelayWebSocketTransport()
         runCatching { transport.send(ByteArray(MAX_RELAY_FRAME_BYTES + 1)) }.isFailure shouldBe true

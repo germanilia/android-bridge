@@ -443,6 +443,7 @@ class LinkManager(
             if (event.generation != relaySessionGate.currentGeneration()) continue
             when (event) {
                 is RelayEvent.Open -> adoptRelay(event.generation)
+                is RelayEvent.Waiting -> _relayStatus.value = RelayUiStatus(RelayConnectionState.PAUSED, "Relay connected; waiting for Mac")
                 is RelayEvent.Closed -> relayDisconnected(event.generation)
                 is RelayEvent.Failure -> relayDisconnected(event.generation)
             }
@@ -480,6 +481,7 @@ class LinkManager(
     private suspend fun relayReceiveLoop() {
         for (frame in relayTransport.inbound) {
             if (frame.generation != relaySessionGate.currentGeneration() || relaySessionGate.route != RelayRoute.RELAY) continue
+            _relayStatus.value = RelayUiStatus(RelayConnectionState.RELAY_CONNECTED)
             val message = try {
                 relayMessageAdapter.decode(frame.bytes)
             } catch (_: Exception) {

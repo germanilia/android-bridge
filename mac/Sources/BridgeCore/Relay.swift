@@ -33,7 +33,8 @@ public struct RelayEndpoint: Equatable {
 
     public init(_ url: URL) throws {
         guard url.scheme?.lowercased() == "https" else { throw RelayError.insecureEndpoint }
-        guard url.host != nil, url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else {
+        guard url.host != nil, url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
+              url.path.isEmpty || url.path == "/" else {
             throw RelayError.invalidEndpoint
         }
         baseURL = url
@@ -263,6 +264,7 @@ public enum RelayTransportState: Equatable {
     case disconnected
     case connecting
     case connected
+    case waitingForPeer
     case failed(String)
 }
 
@@ -363,7 +365,12 @@ public final class URLSessionRelayTransport: NSObject, RelayTransporting, URLSes
                 self.onFrame?(data, generation)
                 self.receive(on: task, generation: generation)
             case .success(.string(let message)):
-                self.fail(String(message.prefix(256)), task: task)
+                if message == "{\"error\":\"peer_absent\"}" {
+                    self.onState?(.waitingForPeer, generation)
+                    self.receive(on: task, generation: generation)
+                } else {
+                    self.fail(String(message.prefix(256)), task: task)
+                }
             case .failure(let error):
                 self.fail(error.localizedDescription, task: task)
             @unknown default:

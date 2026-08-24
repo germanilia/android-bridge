@@ -17,6 +17,7 @@ import okio.ByteString.Companion.toByteString
 sealed interface RelayEvent {
     val generation: Long
     data class Open(override val generation: Long) : RelayEvent
+    data class Waiting(override val generation: Long) : RelayEvent
     data class Closed(override val generation: Long) : RelayEvent
     data class Failure(override val generation: Long, val errorType: String) : RelayEvent
 }
@@ -74,7 +75,11 @@ class RelayWebSocketTransport(
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
-            webSocket.close(1003, "binary frames required")
+            if (text == "{\"error\":\"peer_absent\"}") {
+                eventChannel.trySend(RelayEvent.Waiting(generation))
+            } else {
+                webSocket.close(1003, "unexpected text frame")
+            }
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {

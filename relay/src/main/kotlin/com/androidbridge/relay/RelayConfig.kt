@@ -24,7 +24,7 @@ internal data class RelayConfig(
                 setupCode = setupCode,
                 setupTtlSeconds = long(env, "RELAY_SETUP_TTL_SECONDS", 900, 60L..86_400L),
                 invitationTtlSeconds = long(env, "RELAY_INVITATION_TTL_SECONDS", 600, 60L..86_400L),
-                maxFrameBytes = long(env, "RELAY_MAX_FRAME_BYTES", 1_048_576, 1_024L..16_777_216L),
+                maxFrameBytes = long(env, "RELAY_MAX_FRAME_BYTES", 1_048_580, 1_024L..16_777_216L),
                 sendTimeoutMillis = long(env, "RELAY_SEND_TIMEOUT_MILLIS", 5_000, 100L..60_000L),
                 requireTls = boolean(env, "RELAY_REQUIRE_TLS", true),
             )

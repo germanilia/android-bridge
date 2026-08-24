@@ -663,6 +663,10 @@ public final class LinkManager: ObservableObject {
                 self.setRelayStatus("Connected through relay")
                 self.setStatus(.connected)
                 self.sendRelaySessionFrames()
+            case .waitingForPeer:
+                self.relayConnected = true
+                self.setRelayStatus("Relay connected; waiting for phone")
+                self.setStatus(.disconnected)
             case .disconnected:
                 self.relayConnected = false
                 self.setStatus(.disconnected)
@@ -704,6 +708,8 @@ public final class LinkManager: ObservableObject {
             guard self.relayPolicy.isCurrent(generation), self.relayConnected, self.connection == nil,
                   let replaySession = self.replaySession else { return }
             do {
+                self.setRelayStatus("Connected through relay")
+                self.setStatus(.connected)
                 for message in try self.relayReceiver.ingest(data) {
                     let result = try replaySession.handle(message)
                     for delivered in result.messages { self.route(delivered) }

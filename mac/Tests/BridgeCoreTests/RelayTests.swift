@@ -5,16 +5,17 @@ import DeviceLinkProtocol
 
 final class RelayEndpointTests: XCTestCase {
     func testDerivesEnrollmentInvitationAndWebSocketURLs() throws {
-        let endpoint = try RelayEndpoint(URL(string: "https://relay.example/base")!)
+        let endpoint = try RelayEndpoint(URL(string: "https://relay.example")!)
 
-        XCTAssertEqual(endpoint.setupEnrollmentURL.absoluteString, "https://relay.example/base/v1/enrollment/setup")
-        XCTAssertEqual(endpoint.invitationURL.absoluteString, "https://relay.example/base/v1/invitations")
-        XCTAssertEqual(endpoint.webSocketURL.absoluteString, "wss://relay.example/base/v1/connect")
+        XCTAssertEqual(endpoint.setupEnrollmentURL.absoluteString, "https://relay.example/v1/enrollment/setup")
+        XCTAssertEqual(endpoint.invitationURL.absoluteString, "https://relay.example/v1/invitations")
+        XCTAssertEqual(endpoint.webSocketURL.absoluteString, "wss://relay.example/v1/connect")
     }
 
     func testRejectsInsecureAndCredentialBearingEndpoints() {
         XCTAssertThrowsError(try RelayEndpoint(URL(string: "http://relay.example")!))
         XCTAssertThrowsError(try RelayEndpoint(URL(string: "https://user:pass@relay.example")!))
+        XCTAssertThrowsError(try RelayEndpoint(URL(string: "https://relay.example/custom-path")!))
     }
 }
 
