@@ -68,6 +68,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUser
                            body: "macOS hid the Android Bridge icon — using a Dock icon instead. ⌘-drag other icons off the menu bar to make room.")
         }
 
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(systemWillSleep), name: NSWorkspace.willSleepNotification, object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(systemDidWake), name: NSWorkspace.didWakeNotification, object: nil
+        )
         LinkManager.shared.start()
 
         LinkManager.shared.$screenImage.receive(on: RunLoop.main).sink { [weak self] img in
@@ -97,8 +103,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUser
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        LinkManager.shared.stop()
         updates.cleanup()
     }
+
+    @objc private func systemWillSleep() { LinkManager.shared.prepareForSleep() }
+    @objc private func systemDidWake() { LinkManager.shared.resumeAfterWake() }
 
     private func appMenuItem(_ title: String, action: Selector, key: String) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
