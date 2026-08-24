@@ -9,4 +9,4 @@
 - [x] Step 7: Replace the Android Notes tab with one Meetings experience combining in-person capture and all mirrored meeting content.
 - [x] Step 8: Bump `VERSION` to `0.1.2` and run Android, Swift, release-policy, and packaging validation.
 - [ ] Step 9: Install in place on the Pixel 9a and verify version, preserved Second Brain folder, launch, navigation, refresh, meeting listing, and screenshot.
-- [ ] Step 10: Update evidence, review, commit, push, pass rolling/stable CI, and publish `v0.1.2`.
+- [x] Step 10: Update evidence, review, commit, push, pass rolling/stable CI, and publish `v0.1.2`.

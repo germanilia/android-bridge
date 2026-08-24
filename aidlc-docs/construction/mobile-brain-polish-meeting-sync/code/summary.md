@@ -21,5 +21,12 @@
 - Signed Mac app built, installed, and relaunched with unchanged identity.
 - Existing 66 meetings were mirrored locally; zero media files and zero detected local-path/audio references appeared in the generated directory.
 
+## Publication
+- Commit: `e20a04178e2e96db30402b5610c125a1a5bfeba7`.
+- Rolling CI `32712042695`: passed.
+- Stable CI `32712764217`: passed.
+- Stable release: `https://github.com/germanilia/android-bridge/releases/tag/v0.1.2`.
+- Public latest DMG and APK URLs returned HTTP 200.
+
 ## Remaining Device Evidence
 An intermediate `0.1.2` debug build was installed successfully before the Pixel disconnected. The final combined Meetings-tab build still requires one `adb install -r` after the phone reconnects. The phone remained PIN-locked during automation, so final screenshot comparison is also pending.

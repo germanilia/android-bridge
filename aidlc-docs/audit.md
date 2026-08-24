@@ -1609,3 +1609,11 @@ when I copy text on my mac it shows notifactoinon the phoen can it be transient?
 **Context**: Code Generation and Build/Test for version 0.1.2. Final Pixel install and screenshot could not run because device 62051JEBF07522 disconnected after an intermediate 0.1.2 install. Local changed-code review found no blocker or warning; full Android lint retains only previously documented unrelated findings.
 
 ---
+
+## Mobile Brain Polish and Meeting Sync Publication
+**Timestamp**: 2026-08-24T09:47:42Z
+**User Input**: "thre shuold not be notes tab, its in person mettings need to combine with regular meetings"
+**AI Response**: "Published v0.1.2 from e20a041. Rolling run 32712042695 and stable run 32712764217 passed; both public download URLs returned HTTP 200. The app now has one Meetings tab combining in-person capture with mirrored meeting text, and Brain stays inside the persistent app tabs. Audio remains Mac-local."
+**Context**: Publication complete. Pixel disconnected before the final debug APK could replace the intermediate 0.1.2 build, so final device screenshot/install remains explicitly pending.
+
+---
