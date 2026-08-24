@@ -1,0 +1,6 @@
+# Deploy relay through the configured `homeserver` SSH alias.
+deploy-homeserver *args:
+    @bash scripts/deploy-homeserver.sh {{ args }}
+
+test:
+    @./gradlew test --no-daemon
