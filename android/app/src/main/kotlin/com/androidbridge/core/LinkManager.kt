@@ -94,11 +94,20 @@ class LinkManager(
     private val brainFolder = SecondBrainFolder(context)
     private val relaySettingsRepository = RelaySettingsRepository(store)
     private val localRelayDeviceId = loadRelayDeviceId()
+    private val relaySyncJournal = DurableSyncJournal(File(context.filesDir, "relay-sync"), localRelayDeviceId)
+    private val brainSync = BrainSyncCoordinator(
+        relaySyncJournal,
+        BrainSyncManifest(File(context.filesDir, "brain-sync/manifest.json")),
+        brainFolder,
+    )
     private val relayReplaySession = AndroidRelayReplaySession(
-        DurableSyncJournal(File(context.filesDir, "relay-sync"), localRelayDeviceId),
+        relaySyncJournal,
         localRelayDeviceId,
         "mac",
-    )
+    ) { operation, bytes ->
+        brainSync.applyIncoming(operation, bytes)
+        refreshSecondBrain()
+    }
     private val relayReplayLock = Any()
     private val relayTransport = RelayWebSocketTransport()
     private val relayEnrollmentClient = RelayEnrollmentClient()
@@ -446,7 +455,11 @@ class LinkManager(
         _status.value = ConnectionState.CONNECTED
         _relayStatus.value = RelayUiStatus(RelayConnectionState.RELAY_CONNECTED)
         scope.launch(Dispatchers.IO) {
-            val frames = synchronized(relayReplayLock) { relayReplaySession.sessionFrames() }
+            val frames = synchronized(relayReplayLock) {
+                runCatching { brainSync.captureChanges() }
+                    .onFailure { brainSyncCaptureFailure(it) }
+                relayReplaySession.sessionFrames()
+            }
             frames.forEach(relayTransport::send)
         }
     }
@@ -667,6 +680,7 @@ class LinkManager(
         scope.launch(Dispatchers.IO) {
             try {
                 val scan = brainFolder.scan()
+                captureBrainChanges()
                 _brainNodes.value = scan.nodes
                 _brainConflicts.value = scan.conflicts.size
                 refreshSelectedNote(scan.nodes, refreshSelectedContent)
@@ -737,6 +751,7 @@ class LinkManager(
         scope.launch(Dispatchers.IO) {
             try {
                 brainFolder.save(path, content)
+                captureBrainChanges()
                 _brainNodes.value = brainFolder.nodes()
                 if (_selectedBrainPath.value == path) _selectedBrainContent.value = content
                 _brainStatus.value = "Saved ${path.substringAfterLast('/')}"
@@ -752,6 +767,7 @@ class LinkManager(
         scope.launch(Dispatchers.IO) {
             try {
                 brainFolder.delete(path)
+                captureBrainChanges()
                 if (_selectedBrainPath.value == path) { _selectedBrainPath.value = ""; _selectedBrainContent.value = "" }
                 _brainNodes.value = brainFolder.nodes()
                 _brainStatus.value = "Deleted ${path.substringAfterLast('/')}"
@@ -759,6 +775,21 @@ class LinkManager(
                 brainFailure("Delete", error)
             }
         }
+    }
+
+    private fun captureBrainChanges() {
+        if (!relaySettingsRepository.load().enabled) return
+        runCatching {
+            val frames = synchronized(relayReplayLock) {
+                val operations = brainSync.captureChanges()
+                if (relaySessionGate.route == RelayRoute.RELAY) relayReplaySession.framesFor(operations) else emptyList()
+            }
+            frames.forEach(relayTransport::send)
+        }.onFailure { brainSyncCaptureFailure(it) }
+    }
+
+    private fun brainSyncCaptureFailure(error: Throwable) {
+        LinkLogger.warn("brain_sync_capture_failed", mapOf("error" to error::class.java.simpleName))
     }
 
     /** Live search: debounced so typing doesn't re-read the whole folder per keystroke. */

@@ -21,7 +21,7 @@ data class BrainScan(val nodes: List<SecondBrainNode>, val conflicts: List<Secon
  * Syncthing keeps the folder in sync with the Mac and the home server; this class
  * only reads and writes the local markdown tree — there is no device-to-device sync here.
  */
-class SecondBrainFolder(private val context: Context) {
+class SecondBrainFolder(private val context: Context) : BrainSyncStorage {
     private val prefs = context.getSharedPreferences("second-brain", Context.MODE_PRIVATE)
     private val resolver get() = context.contentResolver
     // SAF reads are slow; cache note contents keyed by (path, lastModified).
@@ -62,23 +62,41 @@ class SecondBrainFolder(private val context: Context) {
 
     fun save(path: String, content: String) {
         require(isMarkdownPath(path)) { "Only .md notes are supported" }
+        write(path, content.encodeToByteArray())
+    }
+
+    override fun files(): List<BrainSyncFile> {
+        val folder = root() ?: return emptyList()
+        val files = mutableListOf<BrainSyncFile>()
+        walkSyncFiles(folder, "", files)
+        return files
+    }
+
+    override fun read(path: String): ByteArray? {
+        require(BrainSyncPolicy.allowsTombstone(path)) { "Unsupported sync path" }
+        val file = resolve(path) ?: return null
+        return resolver.openInputStream(file.uri)?.use { it.readBytes() }
+            ?: throw IOException("Cannot read sync file: $path")
+    }
+
+    override fun write(path: String, bytes: ByteArray) {
+        val mediaType = requireNotNull(BrainSyncPolicy.writableMediaType(path, bytes)) { "Unsupported sync content" }
         val segments = path.split('/')
-        var dir = root() ?: throw IOException("Second Brain folder is unavailable")
+        var directory = root() ?: throw IOException("Second Brain folder is unavailable")
         for (segment in segments.dropLast(1)) {
-            dir = dir.findFile(segment)?.takeIf { it.isDirectory }
-                ?: dir.createDirectory(segment)
+            directory = directory.findFile(segment)?.takeIf { it.isDirectory }
+                ?: directory.createDirectory(segment)
                 ?: throw IOException("Cannot create folder: $segment")
         }
         val name = segments.last()
-        val file = dir.findFile(name) ?: dir.createFile("text/markdown", name)
-            ?: throw IOException("Cannot create note: $name")
-        val output = resolver.openOutputStream(file.uri, "wt")
-            ?: throw IOException("Cannot write note: $name")
-        output.use { it.write(content.toByteArray()) }
+        val file = directory.findFile(name) ?: directory.createFile(mediaType, name)
+            ?: throw IOException("Cannot create sync file: $name")
+        resolver.openOutputStream(file.uri, "wt")?.use { it.write(bytes) }
+            ?: throw IOException("Cannot write sync file: $name")
         contentCache.remove(path)
     }
 
-    fun delete(path: String) {
+    override fun delete(path: String) {
         val file = resolve(path) ?: throw FileNotFoundException("Note not found: $path")
         if (!file.delete()) throw IOException("Cannot delete note: $path")
         contentCache.remove(path)
@@ -139,6 +157,21 @@ class SecondBrainFolder(private val context: Context) {
                 walk(child, path, depth + 1, out)
             } else if (name.endsWith(".md")) {
                 out.add(SecondBrainNode(path, name, false, depth, child.lastModified()))
+            }
+        }
+    }
+
+    private fun walkSyncFiles(directory: DocumentFile, prefix: String, output: MutableList<BrainSyncFile>) {
+        for (child in directory.listFiles()) {
+            val name = child.name ?: continue
+            if (name.startsWith(".")) continue
+            val path = if (prefix.isEmpty()) name else "$prefix/$name"
+            if (child.isDirectory) {
+                walkSyncFiles(child, path, output)
+            } else if (BrainSyncPolicy.allowsTombstone(path) && !isSyncConflictPath(path)) {
+                val bytes = resolver.openInputStream(child.uri)?.use { it.readBytes() }
+                    ?: throw IOException("Cannot read sync file: $path")
+                output += BrainSyncFile(path, bytes)
             }
         }
     }

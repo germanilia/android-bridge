@@ -410,10 +410,12 @@ public enum RelaySyncMessageCodec {
 public struct RelayReplayResult {
     public let messages: [Message]
     public let outboundFrames: [Data]
+    public let appliedOperations: [SyncOperation]
 
-    public init(messages: [Message] = [], outboundFrames: [Data] = []) {
+    public init(messages: [Message] = [], outboundFrames: [Data] = [], appliedOperations: [SyncOperation] = []) {
         self.messages = messages
         self.outboundFrames = outboundFrames
+        self.appliedOperations = appliedOperations
     }
 }
 
@@ -424,6 +426,8 @@ public final class RelayReplaySession {
     private var incomingOperations: [String: SyncOperation] = [:]
     private var reassemblers: [String: SyncTransferReassembler] = [:]
     private var ignoredIncomingOperationIds: Set<String> = []
+    private var snapshotHandler: ((SyncOperation, Data) throws -> Void)?
+    private var tombstoneHandler: ((SyncOperation) throws -> Void)?
 
     public init(journal: DurableSyncJournal, actorId: String, peerActorId: String) {
         self.journal = journal
@@ -435,6 +439,37 @@ public final class RelayReplaySession {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let root = support.appendingPathComponent("AndroidBridge/RelaySync", isDirectory: true)
         return RelayReplaySession(journal: try DurableSyncJournal(rootURL: root, actorId: actorId), actorId: actorId, peerActorId: peerActorId)
+    }
+
+    public func setSyncOperationHandlers(
+        snapshot: @escaping (SyncOperation, Data) throws -> Void,
+        tombstone: @escaping (SyncOperation) throws -> Void
+    ) {
+        snapshotHandler = snapshot
+        tombstoneHandler = tombstone
+    }
+
+    public func enqueueSnapshot(target: String, content: Data, baseDigest: String?, mediaType: String) throws -> [Data] {
+        let operation = try journal.enqueue(
+            operationId: UUID().uuidString,
+            kind: .snapshot,
+            target: target,
+            content: content,
+            baseDigest: baseDigest,
+            mediaType: mediaType
+        )
+        return try operationFrames(operation)
+    }
+
+    public func enqueueTombstone(target: String, baseDigest: String?) throws -> [Data] {
+        let operation = try journal.enqueue(
+            operationId: UUID().uuidString,
+            kind: .tombstone,
+            target: target,
+            content: nil,
+            baseDigest: baseDigest
+        )
+        return try operationFrames(operation)
     }
 
     public func enqueue(_ message: Message) throws -> [Data] {
@@ -454,7 +489,7 @@ public final class RelayReplaySession {
     }
 
     public func sessionFrames() throws -> [Data] {
-        let capabilities = CapabilityAnnouncement(actorId: actorId, capabilities: [.durableSync, .resumableTransfer])
+        let capabilities = CapabilityAnnouncement(actorId: actorId, capabilities: [.durableSync, .resumableTransfer, .noteConflicts])
         let received = try journal.receivedThrough(actorId: peerActorId)
         let resume = ResumeRequest(cursor: SyncCursor(actorId: peerActorId, throughSequence: received))
         var frames = [
@@ -500,27 +535,60 @@ public final class RelayReplaySession {
     }
 
     private func accept(_ operation: SyncOperation) throws -> RelayReplayResult {
+        guard operation.actorId == peerActorId else { throw RelayError.unexpectedMessage }
         switch try journal.incomingDisposition(operation) {
         case .duplicate:
-            ignoredIncomingOperationIds.insert(operation.operationId)
+            if operation.blobDigest != nil { ignoredIncomingOperationIds.insert(operation.operationId) }
             return RelayReplayResult(outboundFrames: [try acknowledgementFrame(operation)])
         case .gap:
-            ignoredIncomingOperationIds.insert(operation.operationId)
+            if operation.blobDigest != nil { ignoredIncomingOperationIds.insert(operation.operationId) }
             let cursor = try journal.receivedThrough(actorId: operation.actorId)
             let resume = ResumeRequest(cursor: SyncCursor(actorId: operation.actorId, throughSequence: cursor))
             return RelayReplayResult(outboundFrames: [try RelaySyncMessageCodec.frame(RelaySyncMessageCodec.message(type: MessageTypes.syncResume, model: resume))])
         case .apply:
-            guard operation.kind == .message, operation.actorId == peerActorId,
-                  operation.blobDigest != nil, operation.resultDigest != nil else {
+            ignoredIncomingOperationIds.remove(operation.operationId)
+            return try prepare(operation)
+        }
+    }
+
+    private func prepare(_ operation: SyncOperation) throws -> RelayReplayResult {
+        switch operation.kind {
+        case .message:
+            guard operation.messageType != nil, operation.blobDigest == operation.resultDigest,
+                  operation.resultDigest != nil else { throw RelayError.unexpectedMessage }
+            return prepareTransfer(operation)
+        case .snapshot:
+            guard snapshotHandler != nil, operation.messageType == nil,
+                  operation.blobDigest == operation.resultDigest,
+                  operation.resultDigest != nil, operation.mediaType != nil else {
                 throw RelayError.unexpectedMessage
             }
-            incomingOperations[operation.operationId] = operation
-            reassemblers[operation.operationId] = SyncTransferReassembler(
-                operationId: operation.operationId,
-                expectedDigest: operation.resultDigest!
+            return prepareTransfer(operation)
+        case .tombstone:
+            guard let tombstoneHandler, operation.messageType == nil,
+                  operation.blobDigest == nil, operation.resultDigest == nil,
+                  operation.byteCount == 0, operation.mediaType == nil else {
+                throw RelayError.unexpectedMessage
+            }
+            guard try journal.recordApplied(operation, durableApply: { try tombstoneHandler(operation) }) else {
+                return RelayReplayResult()
+            }
+            return RelayReplayResult(
+                outboundFrames: [try acknowledgementFrame(operation)],
+                appliedOperations: [operation]
             )
-            return RelayReplayResult()
+        case .transfer:
+            throw RelayError.unexpectedMessage
         }
+    }
+
+    private func prepareTransfer(_ operation: SyncOperation) -> RelayReplayResult {
+        incomingOperations[operation.operationId] = operation
+        reassemblers[operation.operationId] = SyncTransferReassembler(
+            operationId: operation.operationId,
+            expectedDigest: operation.resultDigest!
+        )
+        return RelayReplayResult()
     }
 
     private func accept(_ chunk: TransferChunk) throws -> RelayReplayResult {
@@ -534,14 +602,28 @@ public final class RelayReplaySession {
         try reassembler.accept(chunk)
         guard chunk.isFinal else { return RelayReplayResult() }
         let bytes = try reassembler.result()
-        let original = try MessageCodec.decode([UInt8](bytes))
-        guard original.type == operation.messageType else { throw RelayError.unexpectedMessage }
-        let apply = try journal.recordApplied(operation)
+        guard operation.byteCount == Int64(bytes.count) else { throw RelayError.unexpectedMessage }
+        let messages: [Message]
+        let apply: Bool
+        switch operation.kind {
+        case .message:
+            let original = try MessageCodec.decode([UInt8](bytes))
+            guard original.type == operation.messageType else { throw RelayError.unexpectedMessage }
+            messages = [original]
+            apply = try journal.recordApplied(operation)
+        case .snapshot:
+            guard let snapshotHandler else { throw RelayError.unexpectedMessage }
+            messages = []
+            apply = try journal.recordApplied(operation, durableApply: { try snapshotHandler(operation, bytes) })
+        default:
+            throw RelayError.unexpectedMessage
+        }
         incomingOperations.removeValue(forKey: chunk.operationId)
         reassemblers.removeValue(forKey: chunk.operationId)
         return RelayReplayResult(
-            messages: apply ? [original] : [],
-            outboundFrames: [try acknowledgementFrame(operation)]
+            messages: apply ? messages : [],
+            outboundFrames: [try acknowledgementFrame(operation)],
+            appliedOperations: apply && operation.kind == .snapshot ? [operation] : []
         )
     }
 

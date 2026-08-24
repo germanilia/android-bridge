@@ -183,6 +183,7 @@ public final class LinkManager: ObservableObject {
     private let relayPolicy = DirectFirstRelayPolicy()
     private var relaySettings = RelaySettings(enabled: false, endpoint: "", workspaceId: "", deviceId: "")
     private var replaySession: RelayReplaySession?
+    private var brainSync: SecondBrainDeltaSynchronizer?
     private var relayConnected = false
     private var relayFallbackWorkItem: DispatchWorkItem?
     private var sleeping = false
@@ -555,7 +556,9 @@ public final class LinkManager: ObservableObject {
             relayEndpoint = relaySettings.endpoint
             relayWorkspaceId = relaySettings.workspaceId
             relayStatus = relaySettings.enabled ? "Waiting for direct connection" : "Disabled"
-            replaySession = try RelayReplaySession.applicationSupport(actorId: relaySettings.deviceId)
+            let replaySession = try RelayReplaySession.applicationSupport(actorId: relaySettings.deviceId)
+            self.replaySession = replaySession
+            brainSync = try SecondBrainDeltaSynchronizer.applicationSupport(store: brainStore, replaySession: replaySession)
         } catch {
             relaySettings = RelaySettings(enabled: false, endpoint: "", workspaceId: "", deviceId: generatedId)
             relayStatus = error.localizedDescription
@@ -688,6 +691,7 @@ public final class LinkManager: ObservableObject {
             return
         }
         do {
+            _ = try brainSync?.scan()
             for frame in try replaySession.sessionFrames() { try relayTransport.send(frame) }
         } catch {
             setRelayStatus(error.localizedDescription)
@@ -704,6 +708,7 @@ public final class LinkManager: ObservableObject {
                     let result = try replaySession.handle(message)
                     for delivered in result.messages { self.route(delivered) }
                     for frame in result.outboundFrames { try self.relayTransport.send(frame) }
+                    if !result.appliedOperations.isEmpty { self.refreshBrain() }
                 }
             } catch {
                 LinkLogger.securityEvent("relay_receive_rejected", ["reason": String(describing: error)])
@@ -1257,6 +1262,8 @@ public final class LinkManager: ObservableObject {
 
     private func loadBrain(path: String, loadMap: Bool, existingEdges: [BrainEdge], refreshSelectedContent: Bool) {
         do {
+            let frames = try brainSync?.scan() ?? []
+            sendBrainSyncFrames(frames)
             let nodes = try brainStore.tree()
             let edges = loadMap ? brainStore.edges() : existingEdges
             let content = refreshSelectedContent ? try brainStore.show(path) : nil
@@ -1270,6 +1277,19 @@ public final class LinkManager: ObservableObject {
             }
         } catch {
             brainFailure("Refresh", error)
+        }
+    }
+
+    private func sendBrainSyncFrames(_ frames: [Data]) {
+        guard !frames.isEmpty else { return }
+        queue.async {
+            guard self.relayConnected, self.connection == nil else { return }
+            do {
+                for frame in frames { try self.relayTransport.send(frame) }
+            } catch {
+                self.setRelayStatus(error.localizedDescription)
+                self.relayTransport.disconnect()
+            }
         }
     }
 

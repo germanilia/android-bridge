@@ -1,4 +1,24 @@
+import DeviceLinkProtocol
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
+
+public struct SecondBrainSyncFile: Equatable {
+    public let path: String
+    public let data: Data
+    public let digest: String
+    public let mediaType: String
+}
+
+public enum SecondBrainStoreError: Error, Equatable {
+    case invalidPath
+    case unsupportedContent
+}
+
+public struct SecondBrainApplyResult: Equatable {
+    public let outcome: ConflictOutcome
+    public let conflictPath: String?
+}
 
 public struct BrainNode: Identifiable, Equatable {
     public let id: String
@@ -24,8 +44,11 @@ public struct BrainEdge: Identifiable, Equatable {
 
 public final class SecondBrainStore {
     private let fm = FileManager.default
+    private let explicitRoot: URL?
 
-    public init() {}
+    public init(rootURL: URL? = nil) {
+        self.explicitRoot = rootURL
+    }
 
     private var scriptURL: URL {
         let home = fm.homeDirectoryForCurrentUser
@@ -35,6 +58,7 @@ public final class SecondBrainStore {
     }
 
     public var rootURL: URL {
+        if let explicitRoot { return explicitRoot }
         let home = fm.homeDirectoryForCurrentUser
         let configured = UserDefaults.standard.string(forKey: "secondBrain.root")?.trimmingCharacters(in: .whitespacesAndNewlines)
         let env = ProcessInfo.processInfo.environment["BRAIN_ROOT"]?.trimmingCharacters(in: .whitespaces)
@@ -43,15 +67,79 @@ public final class SecondBrainStore {
     }
 
     public func revision() -> String {
-        let root = rootURL
-        let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey]
-        let files = fm.enumerator(at: root, includingPropertiesForKeys: keys)?.compactMap { $0 as? URL } ?? []
-        let metadata = files.compactMap { url -> String? in
-            guard url.pathExtension.lowercased() == "md", let values = try? url.resourceValues(forKeys: Set(keys)), values.isRegularFile == true else { return nil }
-            let path = String(url.path.dropFirst(root.path.count))
-            return "\(path)|\(values.fileSize ?? 0)|\(values.contentModificationDate?.timeIntervalSince1970 ?? 0)"
-        }
-        return ([root.path] + metadata.sorted()).joined(separator: "\n")
+        let files = (try? syncFiles()) ?? []
+        return ([rootURL.path] + files.map { "\($0.path)|\($0.digest)" }.sorted()).joined(separator: "\n")
+    }
+
+    public func syncFiles() throws -> [SecondBrainSyncFile] {
+        guard fm.fileExists(atPath: rootURL.path) else { return [] }
+        let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey]
+        let urls = fm.enumerator(at: rootURL, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])?.compactMap { $0 as? URL } ?? []
+        return try urls.compactMap { url in
+            let values = try url.resourceValues(forKeys: Set(keys))
+            guard values.isRegularFile == true, values.isSymbolicLink != true else { return nil }
+            let path = relativePath(for: url)
+            guard Self.isSyncablePath(path) else { return nil }
+            let data = try Data(contentsOf: url)
+            guard let mediaType = Self.mediaType(path: path, data: data) else { return nil }
+            return SecondBrainSyncFile(path: path, data: data, digest: ContentHash.sha256(data), mediaType: mediaType)
+        }.sorted { $0.path < $1.path }
+    }
+
+    public func syncData(path: String) throws -> Data? {
+        let url = try safeURL(for: path)
+        guard fm.fileExists(atPath: url.path) else { return nil }
+        return try Data(contentsOf: url)
+    }
+
+    public func writeSyncData(path: String, data: Data, mediaType: String) throws {
+        guard Self.mediaType(path: path, data: data) == mediaType else { throw SecondBrainStoreError.unsupportedContent }
+        let url = try safeURL(for: path)
+        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: url, options: .atomic)
+    }
+
+    public func removeSyncData(path: String) throws {
+        let url = try safeURL(for: path)
+        if fm.fileExists(atPath: url.path) { try fm.removeItem(at: url) }
+    }
+
+    public func conflictPath(for operation: SyncOperation, deleted: Bool = false) throws -> String {
+        guard Self.isValidRelativePath(operation.target) else { throw SecondBrainStoreError.invalidPath }
+        let target = operation.target as NSString
+        let ext = deleted ? "md" : target.pathExtension
+        let stem = (target.lastPathComponent as NSString).deletingPathExtension
+        let actor = operation.actorId.lowercased().map { $0.isASCII && ($0.isLetter || $0.isNumber) ? $0 : "-" }
+        let suffix = deleted ? ".deleted" : ""
+        let name = "\(stem).conflict-\(String(actor))-\(String(format: "%010lld", operation.sequence))\(suffix)"
+        let file = ext.isEmpty ? name : "\(name).\(ext)"
+        let directory = target.deletingLastPathComponent
+        return directory.isEmpty ? file : "\(directory)/\(file)"
+    }
+
+    public static func isSyncablePath(_ path: String) -> Bool {
+        guard isValidRelativePath(path) else { return false }
+        let ext = (path as NSString).pathExtension.lowercased()
+        if ext == "md" { return true }
+        return ["jpg", "jpeg", "png"].contains(ext) && path.hasPrefix("meetings/android-bridge/photos/")
+    }
+
+    public static func mediaType(path: String, data: Data) -> String? {
+        guard isSyncablePath(path) else { return nil }
+        let ext = (path as NSString).pathExtension.lowercased()
+        if ext == "md" { return String(data: data, encoding: .utf8) == nil ? nil : "text/markdown" }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(source) > 0,
+              CGImageSourceCreateImageAtIndex(source, 0, nil) != nil,
+              let type = CGImageSourceGetType(source), let imageType = UTType(type as String) else { return nil }
+        if ["jpg", "jpeg"].contains(ext), imageType.conforms(to: .jpeg) { return "image/jpeg" }
+        if ext == "png", imageType.conforms(to: .png) { return "image/png" }
+        return nil
+    }
+
+    public static func isValidRelativePath(_ path: String) -> Bool {
+        guard !path.isEmpty, !path.hasPrefix("/"), !path.contains("\\"), !path.contains("\0") else { return false }
+        return path.split(separator: "/", omittingEmptySubsequences: false).allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
     }
 
     public func tree() throws -> [BrainNode] {
@@ -120,13 +208,26 @@ public final class SecondBrainStore {
     }
 
     public static func isMarkdownPath(_ path: String) -> Bool {
-        path.hasSuffix(".md") && !path.contains("..") && !path.hasPrefix("/")
+        path.lowercased().hasSuffix(".md") && isValidRelativePath(path)
     }
 
     public func answer(path: String, question: String) throws -> String {
         let content = try show(path)
         let prompt = "Answer the question using only this second-brain node. If the answer is not present, say so briefly.\n\nNode path: \(path)\n\nNode content:\n\(content)\n\nQuestion: \(question)"
         return LLMService(feature: .secondBrainQA).run(prompt, feature: .secondBrainQA) ?? "No answer returned."
+    }
+
+    private func safeURL(for path: String) throws -> URL {
+        guard Self.isValidRelativePath(path) else { throw SecondBrainStoreError.invalidPath }
+        try fm.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        let root = rootURL.resolvingSymlinksInPath().standardizedFileURL
+        let candidate = rootURL.appendingPathComponent(path).resolvingSymlinksInPath().standardizedFileURL
+        guard candidate.path.hasPrefix(root.path + "/") else { throw SecondBrainStoreError.invalidPath }
+        return candidate
+    }
+
+    private func relativePath(for url: URL) -> String {
+        String(url.standardizedFileURL.path.dropFirst(rootURL.standardizedFileURL.path.count + 1))
     }
 
     private func localSearch(_ query: String) throws -> [BrainSearchResult] {

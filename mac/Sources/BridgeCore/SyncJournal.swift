@@ -42,6 +42,7 @@ public final class DurableSyncJournal {
     private let blobURL: URL
     private let actorId: String
     private let lock = NSLock()
+    private let incomingApplyLock = NSLock()
     private var state: JournalState
     private let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
@@ -136,13 +137,21 @@ public final class DurableSyncJournal {
 
     @discardableResult
     public func recordApplied(_ operation: SyncOperation) throws -> Bool {
-        try withLock {
-            switch try disposition(operation) {
-            case .duplicate:
-                return false
-            case .gap:
-                throw SyncJournalError.sequenceGap
-            case .apply:
+        try recordApplied(operation, durableApply: {})
+    }
+
+    @discardableResult
+    public func recordApplied(_ operation: SyncOperation, durableApply: () throws -> Void) throws -> Bool {
+        incomingApplyLock.lock()
+        defer { incomingApplyLock.unlock() }
+        switch try withLock({ try disposition(operation) }) {
+        case .duplicate:
+            return false
+        case .gap:
+            throw SyncJournalError.sequenceGap
+        case .apply:
+            try durableApply()
+            return try withLock {
                 var next = state
                 next.receivedCursors[operation.actorId] = operation.sequence
                 next.receivedOperations[operation.operationId] = ReceivedOperation(actorId: operation.actorId, sequence: operation.sequence)

@@ -1466,7 +1466,7 @@ struct SettingsTab: View {
                 }
                 Text("Direct connection stays preferred. Relay starts after a bounded direct attempt. Credentials and settings are stored in Keychain.")
                     .font(.caption).foregroundStyle(.secondary)
-                Text("Durable protocol-message replay is active over relay. Second Brain delta sync is not implemented.")
+                Text("Durable protocol-message replay and Second Brain Markdown/meeting-photo delta sync are active over relay.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("LLM routing") {

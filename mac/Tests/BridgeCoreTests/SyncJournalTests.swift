@@ -49,6 +49,22 @@ final class SyncJournalTests: XCTestCase {
         }
     }
 
+    func testDurableApplyCallbackRunsBeforeCursorAndDuplicateIsNoOp() throws {
+        enum ApplyFailure: Error { case failed }
+        try withJournalRoot { root in
+            let journal = try DurableSyncJournal(rootURL: root, actorId: "mac")
+            let operation = remoteOperation(id: "remote-1", sequence: 1)
+            var applyCount = 0
+
+            XCTAssertThrowsError(try journal.recordApplied(operation, durableApply: { throw ApplyFailure.failed }))
+            XCTAssertEqual(try journal.receivedThrough(actorId: "phone"), 0)
+            XCTAssertTrue(try journal.recordApplied(operation, durableApply: { applyCount += 1 }))
+            XCTAssertEqual(try journal.receivedThrough(actorId: "phone"), 1)
+            XCTAssertFalse(try journal.recordApplied(operation, durableApply: { applyCount += 1 }))
+            XCTAssertEqual(applyCount, 1)
+        }
+    }
+
     func testHashConflictOutcomes() {
         let base = Data("base".utf8)
         let incoming = Data("incoming".utf8)

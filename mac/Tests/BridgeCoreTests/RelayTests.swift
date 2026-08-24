@@ -170,6 +170,106 @@ final class RelayReplaySessionTests: XCTestCase {
         XCTAssertTrue(duplicateDelivery.isEmpty)
         XCTAssertEqual(try receiver.journal.receivedThrough(actorId: "phone"), 1)
     }
+
+    func testGapOperationAppliesWhenReplayedAfterMissingSequence() throws {
+        let senderRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let receiverRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: senderRoot)
+            try? FileManager.default.removeItem(at: receiverRoot)
+        }
+        let sender = RelayReplaySession(journal: try DurableSyncJournal(rootURL: senderRoot, actorId: "phone"), actorId: "phone", peerActorId: "mac")
+        let receiver = RelayReplaySession(journal: try DurableSyncJournal(rootURL: receiverRoot, actorId: "mac"), actorId: "mac", peerActorId: "phone")
+        let first = Message(id: "event-1", type: MessageTypes.smsReceived, payload: ["body": .string("first")])
+        let second = Message(id: "event-2", type: MessageTypes.smsReceived, payload: ["body": .string("second")])
+        let firstFrames = try sender.enqueue(first)
+        let secondFrames = try sender.enqueue(second)
+
+        for frame in secondFrames { _ = try receiver.handle(MessageCodec.decode([UInt8](frame))) }
+        var delivered: [Message] = []
+        for frame in firstFrames { delivered += try receiver.handle(MessageCodec.decode([UInt8](frame))).messages }
+        for frame in secondFrames { delivered += try receiver.handle(MessageCodec.decode([UInt8](frame))).messages }
+
+        XCTAssertEqual(delivered, [first, second])
+        XCTAssertEqual(try receiver.journal.receivedThrough(actorId: "phone"), 2)
+    }
+
+    func testSnapshotCallbackCompletesBeforeAcknowledgementAndDuplicateIsNoOp() throws {
+        let senderRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let receiverRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: senderRoot)
+            try? FileManager.default.removeItem(at: receiverRoot)
+        }
+        let sender = RelayReplaySession(journal: try DurableSyncJournal(rootURL: senderRoot, actorId: "phone"), actorId: "phone", peerActorId: "mac")
+        let receiver = RelayReplaySession(journal: try DurableSyncJournal(rootURL: receiverRoot, actorId: "mac"), actorId: "mac", peerActorId: "phone")
+        let content = Data("# Synced".utf8)
+        var applied: [(SyncOperation, Data)] = []
+        receiver.setSyncOperationHandlers(
+            snapshot: { operation, data in applied.append((operation, data)) },
+            tombstone: { _ in XCTFail("Unexpected tombstone") }
+        )
+        let frames = try sender.enqueueSnapshot(target: "notes/a.md", content: content, baseDigest: nil, mediaType: "text/markdown")
+        var acknowledgements: [Data] = []
+
+        for frame in frames {
+            let result = try receiver.handle(MessageCodec.decode([UInt8](frame)))
+            if applied.isEmpty { XCTAssertTrue(result.outboundFrames.isEmpty) }
+            acknowledgements += result.outboundFrames
+        }
+
+        XCTAssertEqual(applied.count, 1)
+        XCTAssertEqual(applied.first?.0.target, "notes/a.md")
+        XCTAssertEqual(applied.first?.1, content)
+        XCTAssertEqual(acknowledgements.count, 1)
+        XCTAssertEqual(try receiver.journal.receivedThrough(actorId: "phone"), 1)
+
+        for frame in frames {
+            _ = try receiver.handle(MessageCodec.decode([UInt8](frame)))
+        }
+        XCTAssertEqual(applied.count, 1)
+    }
+
+    func testFailedSnapshotApplyDoesNotAdvanceCursorOrAcknowledge() throws {
+        enum ApplyFailure: Error { case failed }
+        let senderRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let receiverRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: senderRoot)
+            try? FileManager.default.removeItem(at: receiverRoot)
+        }
+        let sender = RelayReplaySession(journal: try DurableSyncJournal(rootURL: senderRoot, actorId: "phone"), actorId: "phone", peerActorId: "mac")
+        let receiver = RelayReplaySession(journal: try DurableSyncJournal(rootURL: receiverRoot, actorId: "mac"), actorId: "mac", peerActorId: "phone")
+        receiver.setSyncOperationHandlers(snapshot: { _, _ in throw ApplyFailure.failed }, tombstone: { _ in })
+        let frames = try sender.enqueueSnapshot(target: "note.md", content: Data("body".utf8), baseDigest: nil, mediaType: "text/markdown")
+
+        for frame in frames.dropLast() {
+            XCTAssertTrue(try receiver.handle(MessageCodec.decode([UInt8](frame))).outboundFrames.isEmpty)
+        }
+        XCTAssertThrowsError(try receiver.handle(MessageCodec.decode([UInt8](try XCTUnwrap(frames.last)))))
+        XCTAssertEqual(try receiver.journal.receivedThrough(actorId: "phone"), 0)
+    }
+
+    func testTombstoneCallbackIsDurableBeforeAcknowledgement() throws {
+        let senderRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let receiverRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: senderRoot)
+            try? FileManager.default.removeItem(at: receiverRoot)
+        }
+        let sender = RelayReplaySession(journal: try DurableSyncJournal(rootURL: senderRoot, actorId: "phone"), actorId: "phone", peerActorId: "mac")
+        let receiver = RelayReplaySession(journal: try DurableSyncJournal(rootURL: receiverRoot, actorId: "mac"), actorId: "mac", peerActorId: "phone")
+        var appliedTarget: String?
+        receiver.setSyncOperationHandlers(snapshot: { _, _ in }, tombstone: { appliedTarget = $0.target })
+
+        let frames = try sender.enqueueTombstone(target: "notes/a.md", baseDigest: String(repeating: "a", count: 64))
+        XCTAssertEqual(frames.count, 1)
+        let result = try receiver.handle(MessageCodec.decode([UInt8](try XCTUnwrap(frames.first))))
+
+        XCTAssertEqual(appliedTarget, "notes/a.md")
+        XCTAssertEqual(result.outboundFrames.count, 1)
+        XCTAssertEqual(try receiver.journal.receivedThrough(actorId: "phone"), 1)
+    }
 }
 
 final class BoundedControlReceiverTests: XCTestCase {

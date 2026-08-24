@@ -32,6 +32,9 @@ internal class AndroidRelayReplaySession(
     private val journal: DurableSyncJournal,
     private val actorId: String,
     private val peerActorId: String,
+    private val syncOperationApplier: (SyncOperation, ByteArray?) -> Unit = { _, _ ->
+        error("No sync operation applier configured")
+    },
 ) {
     private val incoming = mutableMapOf<String, SyncOperation>()
     private val reassemblers = mutableMapOf<String, SyncTransferReassembler>()
@@ -54,7 +57,10 @@ internal class AndroidRelayReplaySession(
     }
 
     fun sessionFrames(): List<ByteArray> {
-        val capability = CapabilityAnnouncement(actorId, listOf(SyncCapability.DURABLE_SYNC, SyncCapability.RESUMABLE_TRANSFER))
+        val capability = CapabilityAnnouncement(
+            actorId,
+            listOf(SyncCapability.DURABLE_SYNC, SyncCapability.RESUMABLE_TRANSFER, SyncCapability.NOTE_CONFLICTS),
+        )
         val resume = ResumeRequest(SyncCursor(peerActorId, journal.receivedThrough(peerActorId)))
         return buildList {
             add(frame(MessageTypes.SYNC_CAPABILITIES, capability))
@@ -91,24 +97,33 @@ internal class AndroidRelayReplaySession(
         journal.acknowledge(ack.cursor.throughSequence)
     }
 
-    private fun accept(operation: SyncOperation): RelayReplayResult = when (journal.incomingDisposition(operation)) {
-        IncomingDisposition.DUPLICATE -> {
-            ignored += operation.operationId
-            RelayReplayResult(outboundFrames = listOf(acknowledgementFrame(operation)))
+    private fun accept(operation: SyncOperation): RelayReplayResult {
+        require(operation.actorId == peerActorId) { "Unexpected relay actor" }
+        validateIncoming(operation)
+        return when (journal.incomingDisposition(operation)) {
+            IncomingDisposition.DUPLICATE -> {
+                if (operation.blobDigest != null) ignored += operation.operationId
+                RelayReplayResult(outboundFrames = listOf(acknowledgementFrame(operation)))
+            }
+            IncomingDisposition.GAP -> {
+                if (operation.blobDigest != null) ignored += operation.operationId
+                val cursor = SyncCursor(operation.actorId, journal.receivedThrough(operation.actorId))
+                RelayReplayResult(outboundFrames = listOf(frame(MessageTypes.SYNC_RESUME, ResumeRequest(cursor))))
+            }
+            IncomingDisposition.APPLY -> acceptNew(operation)
         }
-        IncomingDisposition.GAP -> {
-            ignored += operation.operationId
-            val cursor = SyncCursor(operation.actorId, journal.receivedThrough(operation.actorId))
-            RelayReplayResult(outboundFrames = listOf(frame(MessageTypes.SYNC_RESUME, ResumeRequest(cursor))))
+    }
+
+    private fun acceptNew(operation: SyncOperation): RelayReplayResult {
+        if (operation.kind == SyncOperationKind.TOMBSTONE) {
+            syncOperationApplier(operation, null)
+            journal.recordApplied(operation)
+            return RelayReplayResult(outboundFrames = listOf(acknowledgementFrame(operation)))
         }
-        IncomingDisposition.APPLY -> {
-            require(operation.kind == SyncOperationKind.MESSAGE && operation.actorId == peerActorId)
-            val digest = requireNotNull(operation.resultDigest)
-            requireNotNull(operation.blobDigest)
-            incoming[operation.operationId] = operation
-            reassemblers[operation.operationId] = SyncTransferReassembler(operation.operationId, digest)
-            RelayReplayResult()
-        }
+        val digest = requireNotNull(operation.resultDigest)
+        incoming[operation.operationId] = operation
+        reassemblers[operation.operationId] = SyncTransferReassembler(operation.operationId, digest)
+        return RelayReplayResult()
     }
 
     private fun accept(chunk: TransferChunk): RelayReplayResult {
@@ -120,15 +135,39 @@ internal class AndroidRelayReplaySession(
         val reassembler = requireNotNull(reassemblers[chunk.operationId]) { "Unknown relay transfer" }
         reassembler.accept(chunk)
         if (!chunk.isFinal) return RelayReplayResult()
-        val original = MessageCodec.decode(reassembler.result())
-        require(original.type == operation.messageType) { "Relay message type mismatch" }
+        val bytes = reassembler.result()
+        val original = if (operation.kind == SyncOperationKind.MESSAGE) {
+            MessageCodec.decode(bytes).also { require(it.type == operation.messageType) { "Relay message type mismatch" } }
+        } else {
+            syncOperationApplier(operation, bytes)
+            null
+        }
         val apply = journal.recordApplied(operation)
         incoming -= chunk.operationId
         reassemblers -= chunk.operationId
         return RelayReplayResult(
-            messages = if (apply) listOf(original) else emptyList(),
+            messages = if (apply && original != null) listOf(original) else emptyList(),
             outboundFrames = listOf(acknowledgementFrame(operation)),
         )
+    }
+
+    fun framesFor(operations: List<SyncOperation>): List<ByteArray> = operations.flatMap(::operationFrames)
+
+    private fun validateIncoming(operation: SyncOperation) {
+        when (operation.kind) {
+            SyncOperationKind.MESSAGE -> require(
+                operation.messageType != null && operation.resultDigest != null && operation.blobDigest != null,
+            )
+            SyncOperationKind.SNAPSHOT -> require(
+                operation.messageType == null && operation.resultDigest != null &&
+                    operation.blobDigest == operation.resultDigest && operation.byteCount in 0..MAX_SYNC_FILE_BYTES,
+            )
+            SyncOperationKind.TOMBSTONE -> require(
+                operation.messageType == null && operation.resultDigest == null && operation.blobDigest == null &&
+                    operation.byteCount == 0L && operation.mediaType == null,
+            )
+            SyncOperationKind.TRANSFER -> error("Unsupported relay sync operation")
+        }
     }
 
     private fun operationFrames(operation: SyncOperation): List<ByteArray> = buildList {
@@ -152,4 +191,8 @@ internal class AndroidRelayReplaySession(
 
     private inline fun <reified T> model(message: Message): T =
         SyncModelCodec.json.decodeFromJsonElement(message.payload)
+
+    private companion object {
+        const val MAX_SYNC_FILE_BYTES = 25L * 1024 * 1024
+    }
 }
