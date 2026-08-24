@@ -28,5 +28,5 @@
 - Stable release: `https://github.com/germanilia/android-bridge/releases/tag/v0.1.2`.
 - Public latest DMG and APK URLs returned HTTP 200.
 
-## Remaining Device Evidence
-An intermediate `0.1.2` debug build was installed successfully before the Pixel disconnected. The final combined Meetings-tab build still requires one `adb install -r` after the phone reconnects. The phone remained PIN-locked during automation, so final screenshot comparison is also pending.
+## Device Deployment
+The final `0.1.2` debug-signed build was installed in place on Pixel 9a `62051JEBF07522`. Package inspection confirmed version code `1002`; the existing Second Brain tree URI and 52 cached nodes were preserved. The phone remained PIN-locked, so final screenshot comparison is still pending.

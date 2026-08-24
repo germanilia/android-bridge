@@ -1617,3 +1617,11 @@ when I copy text on my mac it shows notifactoinon the phoen can it be transient?
 **Context**: Publication complete. Pixel disconnected before the final debug APK could replace the intermediate 0.1.2 build, so final device screenshot/install remains explicitly pending.
 
 ---
+
+## Final Pixel Deployment
+**Timestamp**: 2026-08-24T10:27:47Z
+**User Input**: "the phone is cnnected apply it now"
+**AI Response**: "Installed the final debug-signed 0.1.2 build in place on Pixel 9a 62051JEBF07522, relaunched it, and verified version code 1002. Existing Second Brain tree configuration and 52 cached nodes were preserved."
+**Context**: Device deployment completed with adb install -r. The app is running behind the PIN-locked NotificationShade, so screenshot comparison remains pending.
+
+---
