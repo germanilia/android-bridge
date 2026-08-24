@@ -31,7 +31,7 @@ The Mac app also includes local-only productivity tools that work without a phon
   - Android can show the Mac screen full-screen.
   - Phone tap/drag gestures can control the Mac when macOS Accessibility permission is enabled.
 - **Meetings on Mac**
-  - Record meetings locally, transcribe chunks, summarize, ask questions, merge meetings, and browse the meetings folder.
+  - Record meetings locally, transcribe chunks, combine saved chunks into one M4A, summarize, ask questions, merge meetings, and browse the meetings folder.
   - Per-task LLM routing lets summaries and chat use local Ollama by default or pi with a chosen model.
 - **Second Brain on Mac**
   - Browse, read, search, edit, create, delete, and chat with notes in `BRAIN_ROOT` (defaults to `~/second_brain`).

@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import DeviceLinkProtocol
 
 public struct TranscriptSegment: Codable, Equatable {
@@ -12,6 +13,22 @@ public struct MeetingPhoto: Codable, Equatable {
     public let photoId: String
     public let capturedAtMs: Int
     public let fileName: String
+}
+
+public enum MeetingRecordingMergeError: LocalizedError, Equatable {
+    case insufficientRecordings
+    case invalidRecording(String)
+    case exportUnavailable
+    case exportFailed
+
+    public var errorDescription: String? {
+        switch self {
+        case .insufficientRecordings: return "At least two recording chunks are required."
+        case .invalidRecording(let name): return "The recording \(name) is unreadable."
+        case .exportUnavailable: return "A merged M4A recording cannot be created on this Mac."
+        case .exportFailed: return "The merged recording could not be exported."
+        }
+    }
 }
 
 public struct MeetingRecord: Identifiable, Equatable {
@@ -245,9 +262,7 @@ public final class MeetingStore {
         let media = meeting.url.appendingPathComponent("media", isDirectory: true)
         let marker = Self.untranscribedMarker
         let existing = readSegments(in: meeting.url)
-        let audioFiles = ((try? fm.contentsOfDirectory(at: media, includingPropertiesForKeys: nil)) ?? [])
-            .filter { ["m4a", "3gp", "wav"].contains($0.pathExtension.lowercased()) }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let audioFiles = sourceAudioFiles(in: media)
         let segments: [TranscriptSegment]
         if existing.count < audioFiles.count {
             // The transcript doesn't even mention every recorded chunk (the
@@ -313,9 +328,10 @@ public final class MeetingStore {
             let transcript = usableTranscript(segments)
             // Transcript with fewer entries than recorded chunks (or placeholder
             // entries) means Whisper never covered the meeting — re-transcribe.
-            let needsTranscription = segments.count < meeting.audioFiles.count
+            let sourceAudio = sourceAudioFiles(in: meeting.url.appendingPathComponent("media", isDirectory: true))
+            let needsTranscription = segments.count < sourceAudio.count
                 || segments.contains { $0.text.hasPrefix(Self.untranscribedMarker) }
-            if needsTranscription, !meeting.audioFiles.isEmpty {
+            if needsTranscription, !sourceAudio.isEmpty {
                 attempted += 1
                 retranscribeMeeting(meeting)
                 let succeeded = readSummary(summaryURL(in: meeting.url)) != nil
@@ -384,6 +400,76 @@ public final class MeetingStore {
             fh.seekToEndOfFile(); fh.write(data); try? fh.close()
         } else { try? entry.write(to: url, atomically: true, encoding: .utf8) }
         return answer
+    }
+
+    public func mergeRecordings(
+        _ meeting: MeetingRecord,
+        completion: @escaping (Result<URL, Error>) -> Void
+    ) {
+        let sources = sourceAudioFiles(in: meeting.url.appendingPathComponent("media", isDirectory: true))
+        guard sources.count >= 2 else {
+            completion(.failure(MeetingRecordingMergeError.insufficientRecordings))
+            return
+        }
+        do {
+            let composition = try audioComposition(sources)
+            let staged = meeting.url.appendingPathComponent(".merged-recording-\(UUID().uuidString).m4a")
+            let destination = meeting.url.appendingPathComponent("media/merged-recording.m4a")
+            guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetAppleM4A) else {
+                throw MeetingRecordingMergeError.exportUnavailable
+            }
+            exporter.outputURL = staged
+            exporter.outputFileType = .m4a
+            exporter.exportAsynchronously { [fm] in
+                do {
+                    guard exporter.status == .completed else {
+                        throw exporter.error ?? MeetingRecordingMergeError.exportFailed
+                    }
+                    try Self.installMergedRecording(staged, at: destination, fileManager: fm)
+                    completion(.success(destination))
+                } catch {
+                    try? fm.removeItem(at: staged)
+                    completion(.failure(error))
+                }
+            }
+        } catch {
+            completion(.failure(error))
+        }
+    }
+
+    private func sourceAudioFiles(in media: URL) -> [URL] {
+        ((try? fm.contentsOfDirectory(at: media, includingPropertiesForKeys: nil)) ?? [])
+            .filter {
+                ["m4a", "3gp", "wav"].contains($0.pathExtension.lowercased())
+                    && $0.lastPathComponent != "merged-recording.m4a"
+            }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    private func audioComposition(_ sources: [URL]) throws -> AVMutableComposition {
+        let composition = AVMutableComposition()
+        guard let destination = composition.addMutableTrack(
+            withMediaType: .audio,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else { throw MeetingRecordingMergeError.exportUnavailable }
+        var cursor = CMTime.zero
+        for source in sources {
+            let asset = AVURLAsset(url: source)
+            guard let track = asset.tracks(withMediaType: .audio).first else {
+                throw MeetingRecordingMergeError.invalidRecording(source.lastPathComponent)
+            }
+            try destination.insertTimeRange(CMTimeRange(start: .zero, duration: asset.duration), of: track, at: cursor)
+            cursor = CMTimeAdd(cursor, asset.duration)
+        }
+        return composition
+    }
+
+    private static func installMergedRecording(_ staged: URL, at destination: URL, fileManager: FileManager) throws {
+        if fileManager.fileExists(atPath: destination.path) {
+            _ = try fileManager.replaceItemAt(destination, withItemAt: staged)
+        } else {
+            try fileManager.moveItem(at: staged, to: destination)
+        }
     }
 
     public func mergeMeetings(_ records: [MeetingRecord]) -> URL? {

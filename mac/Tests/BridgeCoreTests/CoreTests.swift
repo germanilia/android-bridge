@@ -1,6 +1,7 @@
 import XCTest
 import SwiftCheck
 import Foundation
+import AVFoundation
 @testable import BridgeCore
 import DeviceLinkProtocol
 
@@ -222,6 +223,71 @@ final class MeetingCaptureTests: XCTestCase {
         XCTAssertEqual(titles, ["Pilot Planning"])
     }
 
+    func testMergesAudioChunksIntoOneM4AWithoutDeletingSources() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let media = root.appendingPathComponent("meeting/media", isDirectory: true)
+        try FileManager.default.createDirectory(at: media, withIntermediateDirectories: true)
+        let first = media.appendingPathComponent("001.wav")
+        let second = media.appendingPathComponent("002.wav")
+        try writeSilentWav(first)
+        try writeSilentWav(second)
+        store.appendTranscript(meetingId: "meeting", segment: TranscriptSegment(speaker: "A", startMs: 0, endMs: 100, text: "first"))
+        store.appendTranscript(meetingId: "meeting", segment: TranscriptSegment(speaker: "B", startMs: 100, endMs: 200, text: "second"))
+        let meeting = try XCTUnwrap(store.listMeetings().first)
+        let completed = expectation(description: "recordings merged")
+        var mergedURL: URL?
+        var mergeError: Error?
+
+        store.mergeRecordings(meeting) { result in
+            switch result {
+            case .success(let url): mergedURL = url
+            case .failure(let error): mergeError = error
+            }
+            completed.fulfill()
+        }
+        wait(for: [completed], timeout: 5)
+
+        XCTAssertNil(mergeError)
+        XCTAssertEqual(mergedURL?.lastPathComponent, "merged-recording.m4a")
+        XCTAssertGreaterThan((try mergedURL?.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: first.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: second.path))
+
+        let refreshed = try XCTUnwrap(store.listMeetings().first)
+        XCTAssertEqual(refreshed.audioFiles.count, 3)
+        let replaced = expectation(description: "merged output replaced")
+        store.mergeRecordings(refreshed) { result in
+            if case .failure(let error) = result { XCTFail(error.localizedDescription) }
+            replaced.fulfill()
+        }
+        wait(for: [replaced], timeout: 5)
+        XCTAssertEqual(store.listMeetings().first?.audioFiles.count, 3)
+
+        let backfill = store.backfillMissingSummaries(force: true, summarize: { _ in "summary" }, makeTitle: { _ in nil })
+        XCTAssertEqual(backfill.completed, 1)
+        XCTAssertTrue(store.listMeetings().first?.transcript.contains("first") == true)
+    }
+
+    func testRecordingMergeRequiresTwoSourceChunks() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let media = root.appendingPathComponent("meeting/media", isDirectory: true)
+        try FileManager.default.createDirectory(at: media, withIntermediateDirectories: true)
+        try writeSilentWav(media.appendingPathComponent("only.wav"))
+        let meeting = try XCTUnwrap(store.listMeetings().first)
+
+        store.mergeRecordings(meeting) { result in
+            guard case .failure(let error) = result else {
+                XCTFail("Expected merge to fail")
+                return
+            }
+            XCTAssertEqual(error as? MeetingRecordingMergeError, .insufficientRecordings)
+        }
+    }
+
     func testCompanyNameIsCaseInsensitiveAgainstExistingCluster() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer {
@@ -238,6 +304,14 @@ final class MeetingCaptureTests: XCTestCase {
         XCTAssertEqual(exporter.canonicalClientName("acme-CORP"), "Acme Corp")
         XCTAssertEqual(exporter.canonicalClientName("New Client"), "New Client")
     }
+}
+
+private func writeSilentWav(_ url: URL) throws {
+    let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 8_000, channels: 1))
+    let file = try AVAudioFile(forWriting: url, settings: format.settings)
+    let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 800))
+    buffer.frameLength = 800
+    try file.write(from: buffer)
 }
 
 final class PiInvocationTests: XCTestCase {

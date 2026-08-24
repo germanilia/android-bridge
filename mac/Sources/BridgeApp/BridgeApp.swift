@@ -736,7 +736,16 @@ struct MeetingPreview: View {
 
                 if !meeting.audioFiles.isEmpty {
                     SectionBox("Recordings") {
-                        DisclosureGroup("Audio chunks (\(meeting.audioFiles.count))", isExpanded: $showRecordings) {
+                        let sourceRecordingCount = meeting.audioFiles.count { $0.lastPathComponent != "merged-recording.m4a" }
+                        HStack {
+                            Button { link.mergeMeetingRecordings(meeting) } label: {
+                                Label("Merge into one recording", systemImage: "waveform.path")
+                            }
+                            .disabled(meeting.isActive || sourceRecordingCount < 2)
+                            Text("Source chunks are preserved.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        DisclosureGroup("Audio files (\(meeting.audioFiles.count))", isExpanded: $showRecordings) {
                             ForEach(meeting.audioFiles, id: \.path) { file in
                                 HStack {
                                     Text(file.lastPathComponent).lineLimit(1)

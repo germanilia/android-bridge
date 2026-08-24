@@ -1183,6 +1183,20 @@ public final class LinkManager: ObservableObject {
         return SecondBrainExporter().canonicalClientName(stored)
     }
 
+    public func mergeMeetingRecordings(_ meeting: MeetingRecord) {
+        pushEvent("🎧 Merging recording chunks…")
+        meetingStore.mergeRecordings(meeting) { result in
+            switch result {
+            case .success(let url):
+                self.refreshMeetings()
+                DispatchQueue.main.async { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                self.pushEvent("🎧 Created one merged recording")
+            case .failure(let error):
+                self.pushEvent("⚠️ Recording merge failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     /// Recover a meeting whose chunks were saved but never transcribed.
     public func retranscribeMeeting(_ meeting: MeetingRecord) {
         DispatchQueue.main.async { self.regeneratingSummaryIds.insert(meeting.id) }
