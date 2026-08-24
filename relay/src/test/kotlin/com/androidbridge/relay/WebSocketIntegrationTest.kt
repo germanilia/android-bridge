@@ -47,6 +47,29 @@ class WebSocketIntegrationTest : FunSpec({
         }
     }
 
+    test("sender remains connected while peer disconnects and resumes after peer reconnects") {
+        testApplication {
+            installTestRelay()
+            val pair = enrollPair(jsonClient())
+            val wsClient = createClient { install(WebSockets) }
+            val mac = wsClient.authenticatedSession("mac-1", pair.macCredential)
+            val firstPhone = wsClient.authenticatedSession("phone-1", pair.phoneCredential)
+            firstPhone.close()
+
+            mac.send(Frame.Binary(true, byteArrayOf(1)))
+            (mac.incoming.receive() as Frame.Text).readText() shouldContain "peer_absent"
+
+            val resumedPhone = wsClient.authenticatedSession("phone-1", pair.phoneCredential)
+            val resumedPayload = byteArrayOf(4, 5, 6)
+            mac.send(Frame.Binary(true, resumedPayload))
+            val received = (resumedPhone.incoming.receive() as Frame.Binary).readBytes()
+            received.contentEquals(resumedPayload) shouldBe true
+
+            mac.close()
+            resumedPhone.close()
+        }
+    }
+
     test("oversized frame closes connection and is never forwarded") {
         testApplication {
             installTestRelay(maxFrameBytes = 8)

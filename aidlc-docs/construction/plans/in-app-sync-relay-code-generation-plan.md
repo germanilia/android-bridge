@@ -24,7 +24,7 @@
 - [x] Integrate direct-first relay fallback into `LinkManager` with one active session generation.
 - [x] Add app-private durable journal and blob spool.
 - [x] Integrate replay-safe messages, note snapshots, files, meeting photos, and phone-origin meeting audio; keep live-only actions non-replayable.
-- [ ] Make Android tests/build/lint-vital pass.
+- [x] Make Android tests/build/lint-vital pass.
 
 ## RELAY4 — macOS Client
 - [x] Add failing tests for URL validation, Keychain boundary, transport selection, stale-session rejection, sleep/wake, replay classification, durable send/ACK, note conflict preservation, and transfer spool recovery.
@@ -36,8 +36,8 @@
 - [x] Make Swift tests/build/app assembly pass.
 
 ## RELAY5 — Integration and Release
-- [ ] Run relay plus simulated clients across WSS and inject disconnects/restarts.
-- [ ] Verify offline restart/resume, duplicate suppression, conflicts, files, meetings, credentials, limits, and payload canaries.
+- [x] Run relay plus simulated clients across WSS and inject disconnects/restarts.
+- [x] Verify offline restart/resume, duplicate suppression, conflicts, files, meetings, credentials, limits, and payload canaries.
 - [x] Build and validate the homeserver image and deployment bundle without auto-deploying it.
 - [ ] Run complete Android, Swift, protocol, release-policy, signing, SBOM, scanner, and packaging suites.
 - [ ] Install local signed apps and test direct/relay behavior on separate networks.

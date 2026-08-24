@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SSH_ALIAS="homeserver"
-DEPLOY_DIR="~/android-bridge-relay"
+DEPLOY_DIR="android-bridge-relay"
 IMAGE="android-bridge-relay:1.0.0"
 CONTAINER="android-bridge-relay"
 DOMAIN="relay.homeserver"
@@ -58,6 +58,8 @@ scp -q "$TMP_DIR/package/docker-compose.yml" "$TMP_DIR/package/.env" "$SSH_ALIAS
 scp -q "$TMP_DIR/package/deployments/homeserver/env.homeserver" \
   "$SSH_ALIAS:$DEPLOY_DIR/deployments/homeserver/env.homeserver"
 
+# Local expansion intentionally injects generated values into the remote script.
+# shellcheck disable=SC2087
 ssh "$SSH_ALIAS" bash <<REMOTE_PREPARE
 set -euo pipefail
 cd $DEPLOY_DIR
@@ -73,6 +75,8 @@ scp -q "$TMP_DIR/android-bridge-relay.tar.gz" "$SSH_ALIAS:$DEPLOY_DIR/android-br
 ssh "$SSH_ALIAS" "docker load -i '$DEPLOY_DIR/android-bridge-relay.tar.gz' && rm -f '$DEPLOY_DIR/android-bridge-relay.tar.gz'"
 ssh "$SSH_ALIAS" "cd '$DEPLOY_DIR' && docker compose up -d"
 
+# Local expansion intentionally injects the fixed deployment path into the remote script.
+# shellcheck disable=SC2087
 ssh "$SSH_ALIAS" bash <<REMOTE_HEALTH
 set -euo pipefail
 for attempt in \$(seq 1 60); do
