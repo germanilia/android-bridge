@@ -100,7 +100,13 @@ class LinkManager(
     val brainSearchResults: StateFlow<List<SecondBrainHit>> = _brainSearchResults.asStateFlow()
     private val _brainConflicts = MutableStateFlow(0)
     val brainConflicts: StateFlow<Int> = _brainConflicts.asStateFlow()
+    private val brainRefreshGate = SecondBrainRefreshGate()
+    private val _brainRefreshing = MutableStateFlow(false)
+    val brainRefreshing: StateFlow<Boolean> = _brainRefreshing.asStateFlow()
+    private val _brainNoteLoading = MutableStateFlow(false)
+    val brainNoteLoading: StateFlow<Boolean> = _brainNoteLoading.asStateFlow()
     private var brainSearchJob: Job? = null
+    @Volatile private var brainQuery = ""
     private val _brainStatus = MutableStateFlow("")
     val brainStatus: StateFlow<String> = _brainStatus.asStateFlow()
     private val _brainHasFolder = MutableStateFlow(brainFolder.hasFolder())
@@ -433,20 +439,39 @@ class LinkManager(
     }
 
     fun refreshSecondBrain(refreshSelectedContent: Boolean = true) {
+        if (!brainRefreshGate.tryStart()) return
+        _brainRefreshing.value = true
         scope.launch(Dispatchers.IO) {
             try {
                 val scan = brainFolder.scan()
                 _brainNodes.value = scan.nodes
                 _brainConflicts.value = scan.conflicts.size
-                val selected = _selectedBrainPath.value
-                if (refreshSelectedContent && selected.isNotEmpty()) {
-                    _selectedBrainContent.value = brainFolder.content(selected)
+                refreshSelectedNote(scan.nodes, refreshSelectedContent)
+                val query = brainQuery
+                if (query.isNotBlank()) {
+                    val refreshedResults = brainFolder.search(query)
+                    if (brainQuery == query) _brainSearchResults.value = refreshedResults
                 }
                 val refreshed = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date())
                 _brainStatus.value = "${scan.nodes.count { !it.isDirectory }} notes • refreshed $refreshed"
             } catch (error: Exception) {
                 brainFailure("Refresh", error)
+            } finally {
+                brainRefreshGate.finish()
+                _brainRefreshing.value = false
             }
+        }
+    }
+
+    private fun refreshSelectedNote(nodes: List<SecondBrainNode>, refreshContent: Boolean) {
+        val selected = _selectedBrainPath.value
+        if (selected.isEmpty()) return
+        if (nodes.none { !it.isDirectory && it.path == selected }) {
+            _selectedBrainPath.value = ""
+            _selectedBrainContent.value = ""
+        } else if (refreshContent) {
+            val refreshed = brainFolder.content(selected)
+            if (_selectedBrainPath.value == selected) _selectedBrainContent.value = refreshed
         }
     }
 
@@ -471,11 +496,16 @@ class LinkManager(
 
     fun selectSecondBrainNode(path: String) {
         _selectedBrainPath.value = path
+        _selectedBrainContent.value = ""
+        _brainNoteLoading.value = true
         scope.launch(Dispatchers.IO) {
             try {
-                _selectedBrainContent.value = brainFolder.content(path)
+                val loaded = brainFolder.content(path)
+                if (_selectedBrainPath.value == path) _selectedBrainContent.value = loaded
             } catch (error: Exception) {
                 brainFailure("Read", error)
+            } finally {
+                if (_selectedBrainPath.value == path) _brainNoteLoading.value = false
             }
         }
     }
@@ -510,7 +540,12 @@ class LinkManager(
 
     /** Live search: debounced so typing doesn't re-read the whole folder per keystroke. */
     fun searchSecondBrain(query: String) {
+        brainQuery = query
         brainSearchJob?.cancel()
+        if (query.isBlank()) {
+            _brainSearchResults.value = emptyList()
+            return
+        }
         brainSearchJob = scope.launch(Dispatchers.IO) {
             delay(250)
             try {

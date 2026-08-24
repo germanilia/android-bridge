@@ -12,6 +12,7 @@ import android.provider.OpenableColumns
 import android.provider.Settings
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -55,6 +56,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -404,7 +406,7 @@ private fun HomeScreen(
     }
 
     if (selectedTab.value == 2) {
-        SecondBrainCard(link, connected, onExit = { selectedTab.value = 0 })
+        SecondBrainCard(link, onExit = { selectedTab.value = 0 })
         return
     }
 
@@ -605,8 +607,23 @@ data class AndroidUpdateActions(
     val openReleasePage: (String) -> Unit,
 )
 
+internal enum class SecondBrainDestination { LIBRARY, PREVIEW, EDITOR }
+
+internal sealed interface SecondBrainBack {
+    data object Bridge : SecondBrainBack
+    data object Library : SecondBrainBack
+    data object Preview : SecondBrainBack
+    data object ConfirmDiscard : SecondBrainBack
+}
+
+internal fun secondBrainBack(destination: SecondBrainDestination, dirty: Boolean): SecondBrainBack = when (destination) {
+    SecondBrainDestination.LIBRARY -> SecondBrainBack.Bridge
+    SecondBrainDestination.PREVIEW -> if (dirty) SecondBrainBack.ConfirmDiscard else SecondBrainBack.Library
+    SecondBrainDestination.EDITOR -> if (dirty) SecondBrainBack.ConfirmDiscard else SecondBrainBack.Preview
+}
+
 @Composable
-private fun SecondBrainCard(link: LinkManager, connected: Boolean, onExit: () -> Unit) {
+private fun SecondBrainCard(link: LinkManager, onExit: () -> Unit) {
     val nodes by link.brainNodes.collectAsState()
     val path by link.selectedBrainPath.collectAsState()
     val content by link.selectedBrainContent.collectAsState()
@@ -614,11 +631,15 @@ private fun SecondBrainCard(link: LinkManager, connected: Boolean, onExit: () ->
     val results by link.brainSearchResults.collectAsState()
     val conflicts by link.brainConflicts.collectAsState()
     val folderName by link.brainFolderName.collectAsState()
+    val refreshing by link.brainRefreshing.collectAsState()
+    val noteLoading by link.brainNoteLoading.collectAsState()
     var editText by remember { mutableStateOf(content) }
     var editDirty by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var drawerOpen by remember { mutableStateOf(path.isBlank()) }
     var rawMode by remember { mutableStateOf(false) }
+    var confirmDiscard by remember { mutableStateOf(false) }
+    var discardToLibrary by remember { mutableStateOf(false) }
     var expandedJoined by rememberSaveable { mutableStateOf("") }
     val expandedFolders = remember(expandedJoined) { expandedJoined.split('\n').filter { it.isNotEmpty() }.toSet() }
     val treeNodes = remember(nodes, expandedFolders) {
@@ -662,13 +683,44 @@ private fun SecondBrainCard(link: LinkManager, connected: Boolean, onExit: () ->
 
     LaunchedEffect(path) { editDirty = false }
     LaunchedEffect(content) { if (!editDirty) editText = content }
-    LaunchedEffect(hasFolder, editDirty) {
-        if (hasFolder) {
-            while (true) {
-                link.refreshSecondBrain(refreshSelectedContent = !editDirty)
-                delay(3_000)
+    LaunchedEffect(hasFolder) {
+        if (hasFolder) link.refreshSecondBrain(refreshSelectedContent = !editDirty)
+    }
+
+    val navigateBack = {
+        val destination = when {
+            drawerOpen -> SecondBrainDestination.LIBRARY
+            rawMode -> SecondBrainDestination.EDITOR
+            else -> SecondBrainDestination.PREVIEW
+        }
+        when (secondBrainBack(destination, editDirty)) {
+            SecondBrainBack.Bridge -> onExit()
+            SecondBrainBack.Library -> drawerOpen = true
+            SecondBrainBack.Preview -> rawMode = false
+            SecondBrainBack.ConfirmDiscard -> {
+                discardToLibrary = destination == SecondBrainDestination.PREVIEW
+                confirmDiscard = true
             }
         }
+    }
+    BackHandler(onBack = navigateBack)
+
+    if (confirmDiscard) {
+        AlertDialog(
+            onDismissRequest = { confirmDiscard = false },
+            title = { Text("Discard unsaved changes?") },
+            text = { Text("Your edits to this note have not been saved.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    editText = content
+                    editDirty = false
+                    rawMode = false
+                    drawerOpen = discardToLibrary
+                    confirmDiscard = false
+                }) { Text("Discard") }
+            },
+            dismissButton = { TextButton(onClick = { confirmDiscard = false }) { Text("Keep editing") } },
+        )
     }
 
     Box(Modifier.fillMaxSize().background(bg)) {
@@ -687,7 +739,7 @@ private fun SecondBrainCard(link: LinkManager, connected: Boolean, onExit: () ->
                 Spacer(Modifier.size(20.dp))
                 Button(onClick = { folderPicker.launch(null) }) { Text("Choose Syncthing folder") }
                 Spacer(Modifier.size(12.dp))
-                Text("Close", color = muted, fontSize = 14.sp, modifier = Modifier.clickable(onClick = onExit).padding(8.dp))
+                TextButton(onClick = onExit) { Text("Back to Android Bridge") }
             }
             return@Box
         }
@@ -697,23 +749,29 @@ private fun SecondBrainCard(link: LinkManager, connected: Boolean, onExit: () ->
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(if (drawerOpen) "‹" else "☰", color = text, fontSize = 28.sp, modifier = Modifier.clickable { drawerOpen = !drawerOpen }.padding(6.dp))
+                TextButton(onClick = navigateBack) { Text("Back") }
                 Column(Modifier.weight(1f)) {
-                    Text(if (path.isBlank()) "Vault" else path.substringAfterLast('/').removeSuffix(".md"), color = text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(if (path.isBlank()) "Second Brain" else path.substringAfterLast('/').removeSuffix(".md"), color = text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(if (path.isBlank()) "$folderName • $status" else path, color = muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 if (path.isNotBlank()) {
-                    Text(if (rawMode) "Preview" else "Raw", color = purple, fontSize = 14.sp, modifier = Modifier.clickable { rawMode = !rawMode }.padding(8.dp))
-                    Text("Save", color = purple, fontSize = 14.sp, modifier = Modifier.clickable {
-                        link.saveSecondBrainNode(path, editText) { saved -> if (saved) editDirty = false }
-                    }.padding(8.dp))
+                    TextButton(onClick = { rawMode = !rawMode }) { Text(if (rawMode) "Preview" else "Edit") }
+                    if (rawMode) {
+                        TextButton(
+                            enabled = editDirty,
+                            onClick = { link.saveSecondBrainNode(path, editText) { saved -> if (saved) editDirty = false } },
+                        ) { Text("Save") }
+                    }
                 }
-                Text("×", color = muted, fontSize = 26.sp, modifier = Modifier.clickable(onClick = onExit).padding(6.dp))
             }
 
             if (path.isBlank()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("Open the menu to choose a note", color = muted)
+                    Text("Choose a note from the library", color = muted)
+                }
+            } else if (noteLoading) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
                 }
             } else if (rawMode) {
                 OutlinedTextField(
@@ -739,14 +797,21 @@ private fun SecondBrainCard(link: LinkManager, connected: Boolean, onExit: () ->
         if (drawerOpen) {
             Row(Modifier.fillMaxSize()) {
                 Column(
-                    Modifier.fillMaxHeight().fillMaxWidth(0.86f).background(panel).padding(12.dp),
+                    Modifier.fillMaxHeight().fillMaxWidth().background(panel).padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Vault", color = text, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                        Text("×", color = muted, fontSize = 28.sp, modifier = Modifier.clickable { drawerOpen = false }.padding(8.dp))
+                        TextButton(onClick = navigateBack) { Text("Back") }
+                        Column(Modifier.weight(1f)) {
+                            Text("Second Brain", color = text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                            Text("$folderName • $status", color = muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        if (refreshing) {
+                            CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                        } else {
+                            TextButton(onClick = { link.refreshSecondBrain() }) { Text("Refresh") }
+                        }
                     }
-                    Text("$folderName • $status", color = muted, fontSize = 12.sp)
                     if (conflicts > 0) {
                         Row(
                             Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Color(0xFF3A2B2B)).padding(10.dp),
@@ -771,9 +836,8 @@ private fun SecondBrainCard(link: LinkManager, connected: Boolean, onExit: () ->
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        Chip("Refresh", true, Modifier.weight(1f)) { link.refreshSecondBrain(refreshSelectedContent = !editDirty) }
-                        Chip("New", true, Modifier.weight(1f)) {
+                    Button(
+                        onClick = {
                             val newPath = "mobile/${System.currentTimeMillis()}.md"
                             link.saveSecondBrainNode(newPath, "# Mobile note\n") { saved ->
                                 if (saved) {
@@ -782,8 +846,9 @@ private fun SecondBrainCard(link: LinkManager, connected: Boolean, onExit: () ->
                                     drawerOpen = false
                                 }
                             }
-                        }
-                    }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("New note") }
                     if (query.isNotBlank()) {
                         LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             items(results) { hit ->
@@ -856,7 +921,7 @@ private fun SecondBrainCard(link: LinkManager, connected: Boolean, onExit: () ->
                         }
                     }
                 }
-                Box(Modifier.fillMaxSize().clickable { drawerOpen = false })
+                Spacer(Modifier.size(0.dp))
             }
         }
     }
