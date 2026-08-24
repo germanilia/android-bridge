@@ -73,6 +73,31 @@ final class RelayEnrollmentClientTests: XCTestCase {
 }
 
 final class URLSessionRelayTransportTests: XCTestCase {
+    func testFrameQueueSerializesAndPreservesOrder() {
+        let queue = RelayFrameQueue()
+        let first = Data([1])
+        let second = Data([2])
+        let third = Data([3])
+
+        XCTAssertEqual(queue.enqueue(first), first)
+        XCTAssertNil(queue.enqueue(second))
+        XCTAssertNil(queue.enqueue(third))
+        XCTAssertEqual(queue.complete(), second)
+        XCTAssertEqual(queue.complete(), third)
+        XCTAssertNil(queue.complete())
+    }
+
+    func testFrameQueueResetDropsStaleConnectionFrames() {
+        let queue = RelayFrameQueue()
+        XCTAssertEqual(queue.enqueue(Data([1])), Data([1]))
+        XCTAssertNil(queue.enqueue(Data([2])))
+
+        queue.reset()
+
+        XCTAssertEqual(queue.enqueue(Data([3])), Data([3]))
+        XCTAssertNil(queue.complete())
+    }
+
     func testWebSocketRequestUsesWSSAndCredentialHeaders() throws {
         let endpoint = try RelayEndpoint(URL(string: "https://relay.example")!)
         let request = URLSessionRelayTransport.request(

@@ -276,6 +276,27 @@ public protocol RelayTransporting: AnyObject {
     func disconnect()
 }
 
+final class RelayFrameQueue {
+    private var pending: [Data] = []
+    private var sending = false
+
+    func enqueue(_ frame: Data) -> Data? {
+        guard sending else { sending = true; return frame }
+        pending.append(frame)
+        return nil
+    }
+
+    func complete() -> Data? {
+        guard !pending.isEmpty else { sending = false; return nil }
+        return pending.removeFirst()
+    }
+
+    func reset() {
+        pending.removeAll()
+        sending = false
+    }
+}
+
 public final class URLSessionRelayTransport: NSObject, RelayTransporting, URLSessionWebSocketDelegate {
     public var onState: ((RelayTransportState, UInt64) -> Void)?
     public var onFrame: ((Data, UInt64) -> Void)?
@@ -285,6 +306,7 @@ public final class URLSessionRelayTransport: NSObject, RelayTransporting, URLSes
     private var session: URLSession!
     private var task: URLSessionWebSocketTask?
     private var generation: UInt64 = 0
+    private let outbound = RelayFrameQueue()
 
     public init(configuration: URLSessionConfiguration = .default) {
         self.configuration = configuration
@@ -313,19 +335,33 @@ public final class URLSessionRelayTransport: NSObject, RelayTransporting, URLSes
 
     public func send(_ data: Data) throws {
         lock.lock()
-        let current = task
+        guard let current = task else { lock.unlock(); throw RelayError.transportUnavailable }
+        let next = outbound.enqueue(data)
         lock.unlock()
-        guard let current else { throw RelayError.transportUnavailable }
-        current.send(.data(data)) { [weak self, weak current] error in
-            guard let self, let error, let current else { return }
-            self.fail(error.localizedDescription, task: current)
+        if let next { send(next, on: current) }
+    }
+
+    private func send(_ data: Data, on task: URLSessionWebSocketTask) {
+        task.send(.data(data)) { [weak self, weak task] error in
+            guard let self, let task else { return }
+            if let error { self.fail(error.localizedDescription, task: task); return }
+            self.sendCompleted(on: task)
         }
+    }
+
+    private func sendCompleted(on current: URLSessionWebSocketTask) {
+        lock.lock()
+        guard task === current else { lock.unlock(); return }
+        let next = outbound.complete()
+        lock.unlock()
+        if let next { send(next, on: current) }
     }
 
     public func disconnect() {
         lock.lock()
         let current = task
         task = nil
+        outbound.reset()
         let oldGeneration = generation
         lock.unlock()
         current?.cancel(with: .goingAway, reason: nil)
@@ -396,6 +432,7 @@ public final class URLSessionRelayTransport: NSObject, RelayTransporting, URLSes
         defer { lock.unlock() }
         guard task === candidate else { return nil }
         task = nil
+        outbound.reset()
         return generation
     }
 }
