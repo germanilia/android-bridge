@@ -19,5 +19,13 @@
 - Release build and lint-vital checks: passed.
 - Full `lintDebug` remains blocked by seven pre-existing permission/ChromeOS manifest findings unrelated to this change; no new Second Brain lint finding was reported.
 
+## Publication
+- Commit: `15a8c92c8baa523120c458a808cf5d84ad4d2459`.
+- Rolling CI run `32703661250`: passed.
+- Stable CI run `32704314517`: passed.
+- Stable release: `https://github.com/germanilia/android-bridge/releases/tag/v0.1.1`.
+- Public DMG and APK latest-download URLs returned HTTP 200.
+- Downloaded stable APK reports `versionName=0.1.1`, `versionCode=1001`, and the expected release signer.
+
 ## Device Limitation
 The phone remained behind the PIN keyguard during automated verification. Package, process, version, and preserved preference checks completed; visual touch-flow verification requires the device to be unlocked.
