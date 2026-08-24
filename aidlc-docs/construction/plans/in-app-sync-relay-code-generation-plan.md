@@ -39,9 +39,9 @@
 - [x] Run relay plus simulated clients across WSS and inject disconnects/restarts.
 - [x] Verify offline restart/resume, duplicate suppression, conflicts, files, meetings, credentials, limits, and payload canaries.
 - [x] Build and validate the homeserver image and deployment bundle without auto-deploying it.
-- [ ] Run complete Android, Swift, protocol, release-policy, signing, SBOM, scanner, and packaging suites.
+- [x] Run complete Android, Swift, protocol, release-policy, signing, SBOM, scanner, and packaging suites.
 - [ ] Install local signed apps and test direct/relay behavior on separate networks.
-- [ ] Complete evidence, commit, push, CI, versioned release, and stable-download verification.
+- [x] Complete evidence, commit, push, CI, versioned release, and stable-download verification.
 
 ## Release Gate
 Do not expose relay enablement in a public build until durable persistence, idempotent replay, frame bounds, conflict preservation, credential revocation, and direct-only compatibility pass. Partial relay code must stay disabled.
