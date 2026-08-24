@@ -28,6 +28,13 @@ public struct ReceivedFile: Identifiable, Equatable {
 /// are encrypted on the LAN. This is server-authenticated TLS; full client-certificate mTLS is future hardening.
 public final class LinkManager: ObservableObject {
     @Published public private(set) var status: ConnectionState = .disconnected
+    @Published public private(set) var relayEnabled = false
+    @Published public private(set) var relayEnrolled = false
+    @Published public private(set) var relayEndpoint = ""
+    @Published public private(set) var relayWorkspaceId = ""
+    @Published public private(set) var relayInvitation: String?
+    @Published public private(set) var relayInvitationExpiresAt: String?
+    @Published public private(set) var relayStatus = "Disabled"
     @Published public private(set) var nearby: [NearbyPeer] = []
     @Published public private(set) var pairedFingerprints: Set<String> = []
     @Published public private(set) var lastClipboard: String?
@@ -168,7 +175,17 @@ public final class LinkManager: ObservableObject {
     private var listener: NWListener?
     private var browser: NWBrowser?
     private var connection: NWConnection?
-    private var recvBuffer = [UInt8]()
+    private var directReceiver = BoundedControlReceiver()
+    private var relayReceiver = BoundedControlReceiver()
+    private let relaySettingsStore = RelaySettingsStore()
+    private let relayEnrollmentClient = RelayEnrollmentClient()
+    private let relayTransport = URLSessionRelayTransport()
+    private let relayPolicy = DirectFirstRelayPolicy()
+    private var relaySettings = RelaySettings(enabled: false, endpoint: "", workspaceId: "", deviceId: "")
+    private var replaySession: RelayReplaySession?
+    private var relayConnected = false
+    private var relayFallbackWorkItem: DispatchWorkItem?
+    private var sleeping = false
 
     private let pairedKey = "com.androidbridge.paired"
 
@@ -178,6 +195,9 @@ public final class LinkManager: ObservableObject {
         self.fingerprint = identity.fingerprint
         // Restore known (paired) devices so we auto-reconnect without re-pairing.
         self.pairedFingerprints = Set(UserDefaults.standard.stringArray(forKey: pairedKey) ?? [])
+        loadRelaySettings()
+        relayTransport.onState = { [weak self] state, generation in self?.handleRelayState(state, generation: generation) }
+        relayTransport.onFrame = { [weak self] data, generation in self?.handleRelayFrame(data, generation: generation) }
         cleanReceivedFiles()
         meetingStore.recoverInterruptedProcessing()
         macRecorder.onUpdate = { [weak self] in self?.refreshMeetings() }
@@ -208,6 +228,7 @@ public final class LinkManager: ObservableObject {
         startClipboardWatch()
         startAutoMeetingWatch()
         setStatus(.discovering)
+        scheduleRelayFallback()
     }
 
     /// Observe the pasteboard for the opt-in Auto Sync mode. Manual Push Clipboard remains available.
@@ -322,14 +343,44 @@ public final class LinkManager: ObservableObject {
         let pb = NSPasteboard.general
         guard pb.changeCount != lastPasteboardChange else { return }
         lastPasteboardChange = pb.changeCount
-        guard connection != nil else { return }
+        guard connection != nil || relayConnected else { return }
         if let text = pb.string(forType: .string), !text.isEmpty { sendClipboard(text, userInitiated: false) }
     }
 
     public func stop() {
-        connection?.cancel()
-        listener?.cancel()
-        browser?.cancel()
+        queue.async {
+            self.started = false
+            self.relayFallbackWorkItem?.cancel()
+            self.relayPolicy.suspend()
+            self.relayTransport.disconnect()
+            self.connection?.cancel()
+            self.listener?.cancel()
+            self.browser?.cancel()
+        }
+    }
+
+    public func prepareForSleep() {
+        queue.async {
+            self.sleeping = true
+            self.relayFallbackWorkItem?.cancel()
+            self.relayPolicy.suspend()
+            self.relayTransport.disconnect()
+            self.relayConnected = false
+            self.connection?.cancel()
+            self.setRelayStatus(self.relayEnabled ? "Sleeping" : "Disabled")
+        }
+    }
+
+    public func resumeAfterWake() {
+        queue.async {
+            guard self.started else { return }
+            self.sleeping = false
+            self.browser?.cancel()
+            self.startBrowser()
+            self.setStatus(.discovering)
+            self.scheduleReconnect()
+            self.scheduleRelayFallback()
+        }
     }
 
     public func pair(_ peer: NearbyPeer) {
@@ -369,6 +420,90 @@ public final class LinkManager: ObservableObject {
         UserDefaults.standard.set(enabled, forKey: "clipboard.autoSync")
     }
 
+    public func setRelayEnabled(_ enabled: Bool) {
+        queue.async {
+            guard !enabled || self.relaySettings.isEnrolled else {
+                self.setRelayStatus(RelayError.notEnrolled.localizedDescription)
+                return
+            }
+            self.relaySettings.enabled = enabled
+            do {
+                try self.relaySettingsStore.save(self.relaySettings)
+                DispatchQueue.main.async { self.relayEnabled = enabled }
+                if enabled { self.scheduleRelayFallback() }
+                else { self.disableRelay() }
+            } catch {
+                self.setRelayStatus(error.localizedDescription)
+            }
+        }
+    }
+
+    public func saveRelayEndpoint(_ endpointText: String, workspaceId: String) {
+        do {
+            _ = try RelayEndpoint(try relayURL(endpointText))
+        } catch {
+            setRelayStatus(error.localizedDescription)
+            return
+        }
+        queue.async {
+            let enrollmentChanged = self.relaySettings.endpoint != endpointText || self.relaySettings.workspaceId != workspaceId
+            self.relaySettings.endpoint = endpointText
+            self.relaySettings.workspaceId = workspaceId
+            if enrollmentChanged {
+                self.relaySettings.credential = nil
+                self.relaySettings.enabled = false
+            }
+            self.persistRelaySettings()
+        }
+    }
+
+    public func createRelayPhoneInvitation() {
+        let endpoint: RelayEndpoint
+        let credential: RelayCredential
+        do {
+            endpoint = try RelayEndpoint(try relayURL(relaySettings.endpoint))
+            guard let secret = relaySettings.credential else { throw RelayError.notEnrolled }
+            credential = RelayCredential(deviceId: relaySettings.deviceId, credential: secret)
+        } catch {
+            setRelayStatus(error.localizedDescription)
+            return
+        }
+        setRelayStatus("Creating phone invitation…")
+        Task {
+            do {
+                let invitation = try await relayEnrollmentClient.createPhoneInvitation(endpoint: endpoint, credential: credential)
+                publishRelayInvitation(invitation)
+            } catch {
+                setRelayStatus(error.localizedDescription)
+            }
+        }
+    }
+
+    public func enrollRelay(endpoint endpointText: String, workspaceId: String, setupCode: String) {
+        let endpoint: RelayEndpoint
+        do {
+            endpoint = try RelayEndpoint(try relayURL(endpointText))
+            guard !workspaceId.isEmpty, !setupCode.isEmpty else { throw RelayError.invalidResponse }
+        } catch {
+            setRelayStatus(error.localizedDescription)
+            return
+        }
+        setRelayStatus("Enrolling…")
+        Task {
+            do {
+                let credential = try await relayEnrollmentClient.enrollSetup(
+                    endpoint: endpoint,
+                    workspaceId: workspaceId,
+                    deviceId: relaySettings.deviceId,
+                    setupCode: setupCode
+                )
+                enqueueRelayEnrollment(credential, endpointText: endpointText, workspaceId: workspaceId)
+            } catch {
+                setRelayStatus(error.localizedDescription)
+            }
+        }
+    }
+
     public func sendClipboard(_ text: String, userInitiated: Bool = true) {
         let policy = ClipboardSyncPolicy(clipboardAutoSync ? .auto : .manual)
         guard policy.shouldSend(userInitiated: userInitiated) else { return }
@@ -405,6 +540,188 @@ public final class LinkManager: ObservableObject {
     public func sendTestScreen() {
         send(Message(id: UUID().uuidString, type: MessageTypes.screenStart,
                      payload: ["streamId": .int(1), "codec": .string("h264"), "maxBitrate": .int(8_000_000)]))
+    }
+
+    // MARK: - Relay
+
+    private func loadRelaySettings() {
+        let generatedId = UserDefaults.standard.string(forKey: "relay.deviceId") ?? "mac-\(UUID().uuidString.lowercased())"
+        UserDefaults.standard.set(generatedId, forKey: "relay.deviceId")
+        do {
+            relaySettings = try relaySettingsStore.load()
+                ?? RelaySettings(enabled: false, endpoint: "", workspaceId: "", deviceId: generatedId)
+            relayEnabled = relaySettings.enabled
+            relayEnrolled = relaySettings.isEnrolled
+            relayEndpoint = relaySettings.endpoint
+            relayWorkspaceId = relaySettings.workspaceId
+            relayStatus = relaySettings.enabled ? "Waiting for direct connection" : "Disabled"
+            replaySession = try RelayReplaySession.applicationSupport(actorId: relaySettings.deviceId)
+        } catch {
+            relaySettings = RelaySettings(enabled: false, endpoint: "", workspaceId: "", deviceId: generatedId)
+            relayStatus = error.localizedDescription
+            LinkLogger.securityEvent("relay_settings_load_failed", ["reason": String(describing: error)])
+        }
+    }
+
+    private func publishRelayInvitation(_ invitation: RelayInvitation) {
+        DispatchQueue.main.async {
+            self.relayInvitation = invitation.invitation
+            self.relayInvitationExpiresAt = invitation.expiresAt
+            self.relayStatus = "Phone invitation ready"
+        }
+    }
+
+    private func enqueueRelayEnrollment(_ credential: RelayCredential, endpointText: String, workspaceId: String) {
+        queue.async { self.finishRelayEnrollment(credential, endpointText: endpointText, workspaceId: workspaceId) }
+    }
+
+    private func finishRelayEnrollment(_ credential: RelayCredential, endpointText: String, workspaceId: String) {
+        guard credential.deviceId == relaySettings.deviceId else {
+            setRelayStatus(RelayError.invalidResponse.localizedDescription)
+            return
+        }
+        relaySettings.endpoint = endpointText
+        relaySettings.workspaceId = workspaceId
+        relaySettings.credential = credential.credential
+        persistRelaySettings()
+        setRelayStatus("Enrolled. Relay remains off until enabled.")
+    }
+
+    private func persistRelaySettings() {
+        do {
+            try relaySettingsStore.save(relaySettings)
+            DispatchQueue.main.async {
+                self.relayEnabled = self.relaySettings.enabled
+                self.relayEnrolled = self.relaySettings.isEnrolled
+                self.relayEndpoint = self.relaySettings.endpoint
+                self.relayWorkspaceId = self.relaySettings.workspaceId
+            }
+        } catch {
+            setRelayStatus(error.localizedDescription)
+        }
+    }
+
+    private func disableRelay() {
+        relayFallbackWorkItem?.cancel()
+        relayPolicy.suspend()
+        relayTransport.disconnect()
+        relayConnected = false
+        setRelayStatus("Disabled")
+    }
+
+    private func scheduleRelayFallback() {
+        queue.async {
+            self.relayFallbackWorkItem?.cancel()
+            let enabled = self.relaySettings.enabled && self.relaySettings.isEnrolled && !self.sleeping
+            let plan = self.relayPolicy.begin(relayEnabled: enabled)
+            guard let delay = plan.fallbackDelay else { return }
+            if self.connection != nil {
+                self.relayPolicy.directConnected()
+                self.setRelayStatus("Direct connection active")
+                return
+            }
+            self.setRelayStatus("Waiting for direct connection")
+            let work = DispatchWorkItem { [weak self] in self?.connectRelay(generation: plan.generation) }
+            self.relayFallbackWorkItem = work
+            self.queue.asyncAfter(deadline: .now() + delay, execute: work)
+        }
+    }
+
+    private func connectRelay(generation: UInt64) {
+        guard relayPolicy.isCurrent(generation), !sleeping,
+              let credentialText = relaySettings.credential else { return }
+        if let direct = connection {
+            guard status != .connected else { return }
+            connection = nil
+            direct.cancel()
+        }
+        setStatus(.connecting)
+        do {
+            let endpoint = try RelayEndpoint(try relayURL(relaySettings.endpoint))
+            relayReceiver = BoundedControlReceiver()
+            relayTransport.connect(
+                endpoint: endpoint,
+                credential: RelayCredential(deviceId: relaySettings.deviceId, credential: credentialText),
+                generation: generation
+            )
+        } catch {
+            setRelayStatus(error.localizedDescription)
+        }
+    }
+
+    private func handleRelayState(_ state: RelayTransportState, generation: UInt64) {
+        queue.async {
+            guard self.relayPolicy.isCurrent(generation), self.connection == nil else { return }
+            switch state {
+            case .connecting:
+                self.setRelayStatus("Connecting through relay…")
+            case .connected:
+                self.relayConnected = true
+                self.setRelayStatus("Connected through relay")
+                self.setStatus(.connected)
+                self.sendRelaySessionFrames()
+            case .disconnected:
+                self.relayConnected = false
+                self.setStatus(.disconnected)
+                self.setRelayStatus("Relay disconnected")
+                self.retryRelay(generation: generation)
+            case .failed(let message):
+                self.relayConnected = false
+                self.setStatus(.disconnected)
+                self.setRelayStatus("Relay error: \(message)")
+                self.retryRelay(generation: generation)
+            }
+        }
+    }
+
+    private func retryRelay(generation: UInt64) {
+        queue.asyncAfter(deadline: .now() + 2) {
+            guard self.relayPolicy.isCurrent(generation), self.connection == nil, !self.sleeping else { return }
+            self.scheduleRelayFallback()
+        }
+    }
+
+    private func sendRelaySessionFrames() {
+        guard let replaySession else {
+            setRelayStatus("Relay replay journal unavailable")
+            relayTransport.disconnect()
+            return
+        }
+        do {
+            for frame in try replaySession.sessionFrames() { try relayTransport.send(frame) }
+        } catch {
+            setRelayStatus(error.localizedDescription)
+            relayTransport.disconnect()
+        }
+    }
+
+    private func handleRelayFrame(_ data: Data, generation: UInt64) {
+        queue.async {
+            guard self.relayPolicy.isCurrent(generation), self.relayConnected, self.connection == nil,
+                  let replaySession = self.replaySession else { return }
+            do {
+                for message in try self.relayReceiver.ingest(data) {
+                    let result = try replaySession.handle(message)
+                    for delivered in result.messages { self.route(delivered) }
+                    for frame in result.outboundFrames { try self.relayTransport.send(frame) }
+                }
+            } catch {
+                LinkLogger.securityEvent("relay_receive_rejected", ["reason": String(describing: error)])
+                self.setRelayStatus(error.localizedDescription)
+                self.relayTransport.disconnect()
+            }
+        }
+    }
+
+    private func relayURL(_ text: String) throws -> URL {
+        guard let url = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            throw RelayError.invalidEndpoint
+        }
+        return url
+    }
+
+    private func setRelayStatus(_ text: String) {
+        DispatchQueue.main.async { self.relayStatus = text }
     }
 
     // MARK: - Networking
@@ -463,6 +780,12 @@ public final class LinkManager: ObservableObject {
             self.dbg("conn state=\(state) initiator=\(initiator)")
             switch state {
             case .ready:
+                self.directReceiver = BoundedControlReceiver()
+                self.relayFallbackWorkItem?.cancel()
+                self.relayPolicy.directConnected()
+                self.relayTransport.disconnect()
+                self.relayConnected = false
+                self.setRelayStatus(self.relayEnabled ? "Direct connection active" : "Disabled")
                 self.setStatus(.connected)
                 if initiator { self.send(Message(id: UUID().uuidString, type: MessageTypes.linkHello)) }
                 self.receive(on: conn)
@@ -472,7 +795,10 @@ public final class LinkManager: ObservableObject {
                     self.connection = nil
                     DispatchQueue.main.async { self.screenImage = nil }
                     self.setStatus(.disconnected)
-                    self.scheduleReconnect()
+                    if !self.sleeping {
+                        self.scheduleReconnect()
+                        self.scheduleRelayFallback()
+                    }
                 }
             default:
                 break
@@ -490,7 +816,15 @@ public final class LinkManager: ObservableObject {
     private func receive(on conn: NWConnection) {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
             guard let self else { return }
-            if let data, !data.isEmpty { self.ingest([UInt8](data)) }
+            if let data, !data.isEmpty {
+                do {
+                    for message in try self.directReceiver.ingest(data) { self.route(message) }
+                } catch {
+                    LinkLogger.securityEvent("direct_receive_rejected", ["reason": String(describing: error)])
+                    conn.cancel()
+                    return
+                }
+            }
             if error != nil || isComplete {
                 // A graceful peer close (FIN) never fires .failed — cancel explicitly
                 // or we're left with a zombie "connected" state that blocks reconnects.
@@ -499,17 +833,6 @@ public final class LinkManager: ObservableObject {
                 return
             }
             self.receive(on: conn)
-        }
-    }
-
-    private func ingest(_ bytes: [UInt8]) {
-        recvBuffer.append(contentsOf: bytes)
-        while recvBuffer.count >= 4 {
-            let len = (Int(recvBuffer[0]) << 24) | (Int(recvBuffer[1]) << 16) | (Int(recvBuffer[2]) << 8) | Int(recvBuffer[3])
-            if recvBuffer.count < 4 + len { break }
-            let frame = Array(recvBuffer[0..<(4 + len)])
-            recvBuffer.removeFirst(4 + len)
-            if let msg = try? MessageCodec.decode(frame) { route(msg) }
         }
     }
 
@@ -1349,7 +1672,7 @@ public final class LinkManager: ObservableObject {
 
     private func captureLoop(generation: Int) {
         guard captureActive, generation == captureGeneration else { return }
-        if connection != nil, let cg = CGDisplayCreateImage(CGMainDisplayID()),
+        if connection != nil || relayConnected, let cg = CGDisplayCreateImage(CGMainDisplayID()),
            let jpeg = Self.jpeg(from: cg, maxWidth: 360, quality: 0.25) {
             let scale = 360.0 / Double(cg.width)
             if !warnedScreenCapture {
@@ -1409,10 +1732,21 @@ public final class LinkManager: ObservableObject {
     }
 
     private func send(_ message: Message) {
-        guard let conn = connection, let bytes = try? MessageCodec.encode(message) else { return }
-        conn.send(content: Data(bytes), completion: .contentProcessed { [weak self] err in
-            if err != nil { self?.dbg("send failed → cancel"); conn.cancel() }
-        })
+        if let conn = connection {
+            guard let bytes = try? MessageCodec.encode(message) else { return }
+            conn.send(content: Data(bytes), completion: .contentProcessed { [weak self] err in
+                if err != nil { self?.dbg("send failed → cancel"); conn.cancel() }
+            })
+            return
+        }
+        guard relaySettings.enabled, let replaySession else { return }
+        do {
+            let frames = try replaySession.enqueue(message)
+            guard relayConnected else { return }
+            for frame in frames { try relayTransport.send(frame) }
+        } catch {
+            setRelayStatus(error.localizedDescription)
+        }
     }
 
     private func txtValue(_ txt: NWTXTRecord, _ key: String) -> String? {

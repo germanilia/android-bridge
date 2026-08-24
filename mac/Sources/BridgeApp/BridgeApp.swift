@@ -1396,6 +1396,9 @@ struct SettingsTab: View {
     @AppStorage("pi.secondBrainSkill") private var piSecondBrainSkill = NSHomeDirectory() + "/.agents/skills/second-brain"
     @AppStorage("secondBrain.root") private var secondBrainRoot = NSHomeDirectory() + "/second_brain"
     @AppStorage("meetings.root") private var meetingsRoot = (FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first ?? FileManager.default.homeDirectoryForCurrentUser).appendingPathComponent("AndroidBridgeMeetings").path
+    @State private var relayEndpoint = ""
+    @State private var relayWorkspaceId = ""
+    @State private var relaySetupCode = ""
 
     var body: some View {
         Form {
@@ -1426,6 +1429,44 @@ struct SettingsTab: View {
                     Label("Open Setup Wizard…", systemImage: "wand.and.stars")
                 }
                 Text("Detect installed tools, repair dependencies, review permissions, and connect your Android phone.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Remote relay") {
+                Toggle("Enable relay fallback", isOn: Binding(
+                    get: { link.relayEnabled },
+                    set: { link.setRelayEnabled($0) }
+                ))
+                LabeledContent("Status", value: link.relayStatus)
+                TextField("HTTPS endpoint", text: $relayEndpoint)
+                    .textFieldStyle(.roundedBorder)
+                TextField("Workspace", text: $relayWorkspaceId)
+                    .textFieldStyle(.roundedBorder)
+                SecureField("One-time setup code", text: $relaySetupCode)
+                    .textFieldStyle(.roundedBorder)
+                HStack {
+                    Button("Save endpoint") {
+                        link.saveRelayEndpoint(relayEndpoint, workspaceId: relayWorkspaceId)
+                    }
+                    Button(link.relayEnrolled ? "Re-enroll Mac" : "Enroll Mac") {
+                        let code = relaySetupCode
+                        relaySetupCode = ""
+                        link.enrollRelay(endpoint: relayEndpoint, workspaceId: relayWorkspaceId, setupCode: code)
+                    }
+                    .disabled(relayEndpoint.isEmpty || relayWorkspaceId.isEmpty || relaySetupCode.isEmpty)
+                    Button("Create phone invitation") { link.createRelayPhoneInvitation() }
+                        .disabled(!link.relayEnrolled)
+                }
+                if let invitation = link.relayInvitation {
+                    LabeledContent("Phone invitation") {
+                        Text(invitation).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    }
+                    if let expiry = link.relayInvitationExpiresAt {
+                        Text("Expires \(expiry)").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Text("Direct connection stays preferred. Relay starts after a bounded direct attempt. Credentials and settings are stored in Keychain.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Durable protocol-message replay is active over relay. Second Brain delta sync is not implemented.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("LLM routing") {
@@ -1490,6 +1531,10 @@ struct SettingsTab: View {
         }
         .formStyle(.grouped)
         .padding()
+        .onAppear {
+            relayEndpoint = link.relayEndpoint
+            relayWorkspaceId = link.relayWorkspaceId
+        }
     }
 
     private func pathRow(_ label: String, text: Binding<String>, chooseFolder: Bool) -> some View {
