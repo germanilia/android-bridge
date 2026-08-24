@@ -58,15 +58,7 @@ object TlsLink {
             output.flush()
         }
 
-        fun receive(): Message {
-            val header = ByteArray(4)
-            input.readFully(header)
-            val len = ((header[0].toInt() and 0xFF) shl 24) or ((header[1].toInt() and 0xFF) shl 16) or
-                ((header[2].toInt() and 0xFF) shl 8) or (header[3].toInt() and 0xFF)
-            val body = ByteArray(len)
-            input.readFully(body)
-            return MessageCodec.decode(header + body)
-        }
+        fun receive(): Message = BoundedControlReader.read(input)
 
         fun close() = socket.close()
     }

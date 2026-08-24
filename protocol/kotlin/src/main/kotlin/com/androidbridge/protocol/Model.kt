@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonObject
 const val PROTOCOL_VERSION: Int = 1
 const val MAX_CONTROL_BYTES: Long = 1_048_576 // 1 MiB
 const val DEFAULT_CHUNK_BYTES: Int = 65_536 // 64 KiB
+const val MAX_FRAME_PAYLOAD_BYTES: Long = 65_536 // 64 KiB
 const val INLINE_BLOB_MAX_BYTES: Int = 32_768 // 32 KiB
 const val FLAG_END_OF_STREAM: Int = 0x01
 const val FRAME_HEADER_BYTES: Int = 13
@@ -94,6 +95,15 @@ object MessageTypes {
     const val MEETING_PHOTO_RECEIVED = "meeting.photo.received"
     const val MEETING_PROCESSING_STATUS = "meeting.processing.status"
     const val MEETING_NOTES_READY = "meeting.notes.ready"
+    const val SYNC_CAPABILITIES = "sync.capabilities"
+    const val SYNC_RESUME = "sync.resume"
+    const val SYNC_OPERATION = "sync.operation"
+    const val SYNC_ACK = "sync.ack"
+    const val SYNC_TRANSFER_CHUNK = "sync.transferChunk"
+
+    val sync: Set<String> = setOf(
+        SYNC_CAPABILITIES, SYNC_RESUME, SYNC_OPERATION, SYNC_ACK, SYNC_TRANSFER_CHUNK,
+    )
 
     val known: Set<String> = setOf(
         LINK_HELLO, LINK_HEARTBEAT, PAIR_REQUEST, PAIR_RESPONSE,
@@ -103,5 +113,5 @@ object MessageTypes {
         INPUT_TAP, INPUT_SWIPE, CALL_INCOMING, CALL_ACTION, CALL_STATE, CALL_HISTORY,
         MEETING_START, MEETING_STOP, MEETING_AUDIO_CHUNK_OFFER, MEETING_AUDIO_CHUNK_RECEIVED,
         MEETING_PHOTO_OFFER, MEETING_PHOTO_RECEIVED, MEETING_PROCESSING_STATUS, MEETING_NOTES_READY,
-    )
+    ) + sync
 }

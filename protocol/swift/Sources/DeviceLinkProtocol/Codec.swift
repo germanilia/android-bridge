@@ -76,6 +76,7 @@ public enum MessageCodec {
 public enum FrameCodec {
     public static func encodeFrame(_ header: FrameHeader, _ payload: Data) throws -> [UInt8] {
         if payload.count != header.length { throw ProtocolError.badFrameHeader }
+        if payload.count > ProtocolConstants.maxFramePayloadBytes { throw ProtocolError.oversize }
         var out = [UInt8](repeating: 0, count: ProtocolConstants.frameHeaderBytes + payload.count)
         writeU32BE(&out, 0, header.streamId)
         writeU32BE(&out, 4, header.sequence)
@@ -92,8 +93,62 @@ public enum FrameCodec {
         let sequence = readU32BE(bytes, 4)
         let length = Int(readU32BE(bytes, 8))
         let flags = Int(bytes[12])
+        if length > ProtocolConstants.maxFramePayloadBytes { throw ProtocolError.oversize }
         if bytes.count - ProtocolConstants.frameHeaderBytes < length { throw ProtocolError.badFrameHeader }
         let payload = Data(bytes[ProtocolConstants.frameHeaderBytes..<(ProtocolConstants.frameHeaderBytes + length)])
         return Frame(header: FrameHeader(streamId: streamId, sequence: sequence, length: length, flags: flags), payload: payload)
+    }
+}
+
+/// Incremental control decoder that validates each declared length before allocating its body.
+public final class ControlStreamDecoder {
+    private var header: [UInt8] = []
+    private var body: [UInt8] = []
+    private var declaredLength: Int?
+
+    public init() {}
+
+    public var bufferedByteCount: Int { header.count + body.count }
+
+    public func ingest(_ bytes: [UInt8]) throws -> [Message] {
+        var messages: [Message] = []
+        var offset = 0
+        while offset < bytes.count {
+            if let length = declaredLength {
+                let count = min(length - body.count, bytes.count - offset)
+                body.append(contentsOf: bytes[offset..<(offset + count)])
+                offset += count
+                if body.count == length { messages.append(try finishMessage()) }
+            } else {
+                let count = min(4 - header.count, bytes.count - offset)
+                header.append(contentsOf: bytes[offset..<(offset + count)])
+                offset += count
+                if header.count == 4 { try allocateBody() }
+            }
+        }
+        return messages
+    }
+
+    private func allocateBody() throws {
+        let length = Int(readU32BE(header, 0))
+        guard length <= ProtocolConstants.maxControlBytes else {
+            reset()
+            throw ProtocolError.oversize
+        }
+        declaredLength = length
+        body.reserveCapacity(length)
+        if length == 0 { _ = try finishMessage() }
+    }
+
+    private func finishMessage() throws -> Message {
+        let framed = header + body
+        reset()
+        return try MessageCodec.decode(framed)
+    }
+
+    private func reset() {
+        header.removeAll(keepingCapacity: true)
+        body.removeAll(keepingCapacity: false)
+        declaredLength = nil
     }
 }

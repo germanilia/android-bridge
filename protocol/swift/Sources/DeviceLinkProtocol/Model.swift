@@ -5,6 +5,7 @@ public enum ProtocolConstants {
     public static let version = 1
     public static let maxControlBytes = 1_048_576 // 1 MiB
     public static let defaultChunkBytes = 65_536 // 64 KiB
+    public static let maxFramePayloadBytes = 65_536 // 64 KiB
     public static let inlineBlobMaxBytes = 32_768 // 32 KiB
     public static let flagEndOfStream = 0x01
     public static let frameHeaderBytes = 13
@@ -169,8 +170,17 @@ public enum MessageTypes {
     public static let meetingPhotoReceived = "meeting.photo.received"
     public static let meetingProcessingStatus = "meeting.processing.status"
     public static let meetingNotesReady = "meeting.notes.ready"
+    public static let syncCapabilities = "sync.capabilities"
+    public static let syncResume = "sync.resume"
+    public static let syncOperation = "sync.operation"
+    public static let syncAck = "sync.ack"
+    public static let syncTransferChunk = "sync.transferChunk"
 
-    public static let known: Set<String> = [
+    public static let sync: Set<String> = [
+        syncCapabilities, syncResume, syncOperation, syncAck, syncTransferChunk,
+    ]
+
+    public static let known: Set<String> = Set([
         linkHello, linkHeartbeat, pairRequest, pairResponse,
         notifPosted, smsReceived, smsThread,
         fileOffer, fileAccept, fileProgress, fileChunk,
@@ -178,5 +188,5 @@ public enum MessageTypes {
         inputTap, inputSwipe, callIncoming, callAction, callState, callHistory,
         meetingStart, meetingStop, meetingAudioChunkOffer, meetingAudioChunkReceived,
         meetingPhotoOffer, meetingPhotoReceived, meetingProcessingStatus, meetingNotesReady,
-    ]
+    ]).union(sync)
 }

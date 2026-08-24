@@ -79,6 +79,7 @@ object MessageCodec {
 object FrameCodec {
     fun encodeFrame(header: FrameHeader, payload: ByteArray): ByteArray {
         if (payload.size != header.length) throw ProtocolException(ProtocolErrorCode.BAD_FRAME_HEADER)
+        if (payload.size > MAX_FRAME_PAYLOAD_BYTES) throw ProtocolException(ProtocolErrorCode.OVERSIZE)
         val out = ByteArray(FRAME_HEADER_BYTES + payload.size)
         writeU32BE(out, 0, header.streamId)
         writeU32BE(out, 4, header.sequence)
@@ -94,8 +95,63 @@ object FrameCodec {
         val sequence = readU32BE(bytes, 4)
         val length = readU32BE(bytes, 8)
         val flags = bytes[12].toInt() and 0xFF
+        if (length > MAX_FRAME_PAYLOAD_BYTES) throw ProtocolException(ProtocolErrorCode.OVERSIZE)
         if (bytes.size - FRAME_HEADER_BYTES < length) throw ProtocolException(ProtocolErrorCode.BAD_FRAME_HEADER)
         val payload = bytes.copyOfRange(FRAME_HEADER_BYTES, FRAME_HEADER_BYTES + length.toInt())
         return Frame(FrameHeader(streamId, sequence, length.toInt(), flags), payload)
+    }
+}
+
+/** Incremental control decoder that validates each declared length before allocating its body. */
+class ControlStreamDecoder {
+    private val header = ByteArray(4)
+    private var headerCount = 0
+    private var body: ByteArray? = null
+    private var bodyCount = 0
+
+    val bufferedByteCount: Int get() = headerCount + bodyCount
+
+    fun ingest(bytes: ByteArray): List<Message> {
+        val messages = ArrayList<Message>()
+        var offset = 0
+        while (offset < bytes.size) {
+            val target = body
+            if (target == null) {
+                val count = minOf(4 - headerCount, bytes.size - offset)
+                bytes.copyInto(header, headerCount, offset, offset + count)
+                headerCount += count
+                offset += count
+                if (headerCount == 4) allocateBody()
+            } else {
+                val count = minOf(target.size - bodyCount, bytes.size - offset)
+                bytes.copyInto(target, bodyCount, offset, offset + count)
+                bodyCount += count
+                offset += count
+                if (bodyCount == target.size) messages.add(finishMessage())
+            }
+        }
+        return messages
+    }
+
+    private fun allocateBody() {
+        val length = readU32BE(header, 0)
+        if (length > MAX_CONTROL_BYTES) {
+            reset()
+            throw ProtocolException(ProtocolErrorCode.OVERSIZE)
+        }
+        body = ByteArray(length.toInt())
+        if (length == 0L) finishMessage()
+    }
+
+    private fun finishMessage(): Message {
+        val framed = header + requireNotNull(body)
+        reset()
+        return MessageCodec.decode(framed)
+    }
+
+    private fun reset() {
+        headerCount = 0
+        body = null
+        bodyCount = 0
     }
 }
