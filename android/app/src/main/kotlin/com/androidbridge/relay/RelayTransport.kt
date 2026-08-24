@@ -13,6 +13,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
+import java.util.concurrent.TimeUnit
 
 sealed interface RelayEvent {
     val generation: Long
@@ -26,7 +27,7 @@ data class RelayInboundFrame(val generation: Long, val bytes: ByteArray)
 
 /** WSS is a byte transport. Relay envelope/delta models plug in through [RelayMessageAdapter]. */
 class RelayWebSocketTransport(
-    private val client: OkHttpClient = OkHttpClient(),
+    private val client: OkHttpClient = OkHttpClient.Builder().pingInterval(10, TimeUnit.SECONDS).build(),
     inboundCapacity: Int = 64,
 ) {
     private val eventChannel = Channel<RelayEvent>(Channel.BUFFERED)

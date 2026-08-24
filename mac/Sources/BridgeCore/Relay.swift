@@ -302,14 +302,18 @@ public final class URLSessionRelayTransport: NSObject, RelayTransporting, URLSes
     public var onFrame: ((Data, UInt64) -> Void)?
 
     private let configuration: URLSessionConfiguration
+    private let pingInterval: TimeInterval
     private let lock = NSLock()
+    private let keepaliveQueue = DispatchQueue(label: "com.androidbridge.relay.keepalive")
     private var session: URLSession!
     private var task: URLSessionWebSocketTask?
     private var generation: UInt64 = 0
     private let outbound = RelayFrameQueue()
 
-    public init(configuration: URLSessionConfiguration = .default) {
+    public init(configuration: URLSessionConfiguration = .default, pingInterval: TimeInterval = 10) {
+        precondition(pingInterval > 0)
         self.configuration = configuration
+        self.pingInterval = pingInterval
         super.init()
         session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
     }
@@ -376,6 +380,7 @@ public final class URLSessionRelayTransport: NSObject, RelayTransporting, URLSes
         guard let currentGeneration = currentGeneration(for: webSocketTask) else { return }
         onState?(.connected, currentGeneration)
         receive(on: webSocketTask, generation: currentGeneration)
+        schedulePing(on: webSocketTask, generation: currentGeneration)
     }
 
     public func urlSession(
@@ -386,6 +391,22 @@ public final class URLSessionRelayTransport: NSObject, RelayTransporting, URLSes
     ) {
         guard let currentGeneration = clearIfCurrent(webSocketTask) else { return }
         onState?(.disconnected, currentGeneration)
+    }
+
+    public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard let webSocketTask = task as? URLSessionWebSocketTask, let error else { return }
+        fail(error.localizedDescription, task: webSocketTask)
+    }
+
+    private func schedulePing(on task: URLSessionWebSocketTask, generation: UInt64) {
+        keepaliveQueue.asyncAfter(deadline: .now() + pingInterval) { [weak self, weak task] in
+            guard let self, let task, self.currentGeneration(for: task) == generation else { return }
+            task.sendPing { [weak self, weak task] error in
+                guard let self, let task else { return }
+                if let error { self.fail(error.localizedDescription, task: task); return }
+                self.schedulePing(on: task, generation: generation)
+            }
+        }
     }
 
     private func receive(on task: URLSessionWebSocketTask, generation: UInt64) {
