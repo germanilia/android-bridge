@@ -66,6 +66,7 @@ public final class LinkManager: ObservableObject {
     private var zoomAutoMeetingActive = false
     private let brainStore = SecondBrainStore()
     private let customerStore = MeetingCustomerStore()
+    private let meetingContentMirror = MeetingContentMirror()
 
     /// Broadcast for inbound events so the app can show a banner (reliable without notification entitlements).
     public let notificationSubject = PassthroughSubject<(title: String, body: String, userInfo: [AnyHashable: Any]), Never>()
@@ -90,7 +91,9 @@ public final class LinkManager: ObservableObject {
     private let macRecorder = MacMeetingRecorder.shared
     private let meetingProcessingQueue = DispatchQueue(label: "com.androidbridge.meeting.processing")
     private let meetingFinalizationQueue = DispatchQueue(label: "com.androidbridge.meeting.finalization")
+    private let meetingContentMirrorQueue = DispatchQueue(label: "com.androidbridge.meeting-content-mirror", qos: .utility)
     private let brainRefreshQueue = DispatchQueue(label: "com.androidbridge.second-brain.refresh")
+    private var meetingContentMirrorGeneration = 0
     private var lastBrainRevision = ""
     private var lastPasteboardChange = 0
 
@@ -104,6 +107,7 @@ public final class LinkManager: ObservableObject {
 
     private func refreshMeetings() {
         let records = meetingStore.listMeetings(activeIds: activeMeetingIds)
+        scheduleMeetingContentMirror(records)
         do {
             let catalog = try customerStore.customers(meetingNames: records.map(\.company))
             let associations = try customerStore.associations()
@@ -119,6 +123,23 @@ public final class LinkManager: ObservableObject {
                 self.customers = []
                 self.customerAssociations = []
                 self.customerStatus = error.localizedDescription
+            }
+        }
+    }
+
+    private func scheduleMeetingContentMirror(_ records: [MeetingRecord]) {
+        guard !CommandLine.arguments.contains(where: { $0.contains("xctest") }) else { return }
+        meetingContentMirrorQueue.async {
+            self.meetingContentMirrorGeneration += 1
+            let generation = self.meetingContentMirrorGeneration
+            self.meetingContentMirrorQueue.asyncAfter(deadline: .now() + 0.4) {
+                guard generation == self.meetingContentMirrorGeneration else { return }
+                do {
+                    try self.meetingContentMirror.sync(records)
+                    self.dbg("MEETING_CONTENT mirrored=\(records.count)")
+                } catch {
+                    self.dbg("MEETING_CONTENT failed=\(error.localizedDescription)")
+                }
             }
         }
     }

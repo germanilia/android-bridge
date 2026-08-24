@@ -405,11 +405,6 @@ private fun HomeScreen(
         return
     }
 
-    if (selectedTab.value == 2) {
-        SecondBrainCard(link, onExit = { selectedTab.value = 0 })
-        return
-    }
-
     Column(modifier = Modifier.fillMaxSize()) {
         // Fixed header (does not scroll)
         Row(
@@ -432,20 +427,33 @@ private fun HomeScreen(
 
         TabRow(selectedTabIndex = selectedTab.value) {
             Tab(selected = selectedTab.value == 0, onClick = { selectedTab.value = 0 }, text = { Text("Bridge") })
-            Tab(selected = selectedTab.value == 1, onClick = { selectedTab.value = 1 }, text = { Text("Notes") })
+            Tab(selected = selectedTab.value == 1, onClick = { selectedTab.value = 1 }, text = { Text("Meetings") })
             Tab(selected = selectedTab.value == 2, onClick = { selectedTab.value = 2 }, text = { Text("Brain") })
             Tab(selected = selectedTab.value == 3, onClick = { selectedTab.value = 3 }, text = { Text("Settings") })
         }
 
+        if (selectedTab.value == 2) {
+            SecondBrainCard(link, onExit = { selectedTab.value = 0 })
+        } else if (selectedTab.value == 1) {
+            MeetingsScreen(
+                link = link,
+                connected = connected,
+                recording = meetingRecording,
+                paused = meetingPaused,
+                onStart = onStartMeeting,
+                onPause = onPauseMeeting,
+                onResume = onResumeMeeting,
+                onStop = onStopMeeting,
+                onPhoto = onTakeMeetingPhoto,
+                onExit = { selectedTab.value = 0 },
+            )
+        } else {
         Column(
             modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
         if (selectedTab.value == 3) {
             UpdateSettingsCard(updateState, updateActions)
-        } else if (selectedTab.value == 1) {
-            MeetingCaptureCard(connected, meetingRecording, meetingPaused, onStartMeeting, onPauseMeeting, onResumeMeeting, onStopMeeting, onTakeMeetingPhoto)
-            Text("Past meetings, transcripts, summaries, audio, photos, and Q&A are managed on the Mac Notes tab.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
         } else {
         SectionCard("This device") {
             Text(Build.MODEL ?: "Android", color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Medium)
@@ -480,8 +488,8 @@ private fun HomeScreen(
             }
         }
 
-        SectionCard("Meeting Notes") {
-            Text("Open the Notes tab to record/pause/resume, capture photos, and watch meeting status.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+        SectionCard("Meetings") {
+            Text("Open the Meetings tab to record in person and review all synced meeting content.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
         }
 
         SectionCard("Clipboard & files") {
@@ -532,8 +540,120 @@ private fun HomeScreen(
         }
         }
         } // end scrollable content
+        }
     }
     UpdateDialogs(updateState, updateActions)
+}
+
+@Composable
+private fun MeetingsScreen(
+    link: LinkManager,
+    connected: Boolean,
+    recording: Boolean,
+    paused: Boolean,
+    onStart: () -> Unit,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+    onStop: () -> Unit,
+    onPhoto: () -> Unit,
+    onExit: () -> Unit,
+) {
+    val nodes by link.brainNodes.collectAsState()
+    val content by link.selectedBrainContent.collectAsState()
+    val loading by link.brainNoteLoading.collectAsState()
+    val refreshing by link.brainRefreshing.collectAsState()
+    var openPath by rememberSaveable { mutableStateOf<String?>(null) }
+    val meetings = remember(nodes) {
+        nodes.filter { !it.isDirectory && isMirroredMeetingNote(it.path) }
+            .sortedByDescending { it.modifiedAt }
+    }
+
+    LaunchedEffect(Unit) { link.refreshSecondBrain() }
+    BackHandler {
+        if (openPath == null) onExit() else openPath = null
+    }
+
+    if (openPath != null) {
+        Column(Modifier.fillMaxSize()) {
+            Row(
+                Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = { openPath = null }) { Text("Back") }
+                Text(
+                    displayBrainLabel(openPath!!.substringAfterLast('/')),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            if (loading) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+            } else {
+                MarkdownView(
+                    markdown = content,
+                    text = MaterialTheme.colorScheme.onSurface,
+                    muted = MaterialTheme.colorScheme.onSurfaceVariant,
+                    codeBg = MaterialTheme.colorScheme.surfaceVariant,
+                    accent = MaterialTheme.colorScheme.primary,
+                    onLink = {},
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+        return
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 14.dp),
+    ) {
+        item {
+            MeetingCaptureCard(connected, recording, paused, onStart, onPause, onResume, onStop, onPhoto)
+        }
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.weight(1f)) {
+                    Text("Past meetings", color = MaterialTheme.colorScheme.onBackground, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    Text("Summaries and transcripts sync here. Recordings stay on the Mac.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                }
+                if (refreshing) {
+                    CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                } else {
+                    TextButton(onClick = { link.refreshSecondBrain() }) { Text("Refresh") }
+                }
+            }
+        }
+        if (meetings.isEmpty() && !refreshing) {
+            item {
+                SectionCard("No synced meetings") {
+                    Text("Keep Syncthing running on the Mac and phone. Meeting text appears here automatically.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                }
+            }
+        }
+        items(meetings, key = { it.path }) { note ->
+            Card(
+                modifier = Modifier.fillMaxWidth().clickable {
+                    link.selectSecondBrainNode(note.path)
+                    openPath = note.path
+                },
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(14.dp),
+            ) {
+                Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(displayBrainLabel(note.label), color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text("Summary • Transcript • Q&A", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                    }
+                    Text("Open", color = MaterialTheme.colorScheme.primary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -622,6 +742,16 @@ internal fun secondBrainBack(destination: SecondBrainDestination, dirty: Boolean
     SecondBrainDestination.EDITOR -> if (dirty) SecondBrainBack.ConfirmDiscard else SecondBrainBack.Preview
 }
 
+internal fun displayBrainLabel(fileName: String): String {
+    val base = fileName.removeSuffix(".md")
+    if (base.equals("index", ignoreCase = true)) return "Overview"
+    val words = base.replace(Regex("[-_]+"), " ").trim()
+    return words.replaceFirstChar { it.uppercase() }
+}
+
+internal fun isMirroredMeetingNote(path: String): Boolean =
+    path.startsWith("meetings/android-bridge/") && path.endsWith(".md") && !path.endsWith("/index.md")
+
 @Composable
 private fun SecondBrainCard(link: LinkManager, onExit: () -> Unit) {
     val nodes by link.brainNodes.collectAsState()
@@ -643,7 +773,9 @@ private fun SecondBrainCard(link: LinkManager, onExit: () -> Unit) {
     var expandedJoined by rememberSaveable { mutableStateOf("") }
     val expandedFolders = remember(expandedJoined) { expandedJoined.split('\n').filter { it.isNotEmpty() }.toSet() }
     val treeNodes = remember(nodes, expandedFolders) {
-        nodes.filter { node -> folderAncestors(node.path).all(expandedFolders::contains) }
+        nodes.filter { node ->
+            node.label.trim().trim('.').isNotEmpty() && folderAncestors(node.path).all(expandedFolders::contains)
+        }
     }
     val folderNoteCounts = remember(nodes) {
         val counts = HashMap<String, Int>()
@@ -653,12 +785,11 @@ private fun SecondBrainCard(link: LinkManager, onExit: () -> Unit) {
         }
         counts
     }
-    val bg = Color(0xFF1E1E1E)
-    val panel = Color(0xFF262626)
-    val line = Color(0xFF3A3A3A)
-    val text = Color(0xFFE6E1F0)
-    val muted = Color(0xFFAAA3B7)
-    val purple = Color(0xFF8F7CF8)
+    val bg = MaterialTheme.colorScheme.background
+    val panel = MaterialTheme.colorScheme.surface
+    val text = MaterialTheme.colorScheme.onSurface
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val purple = MaterialTheme.colorScheme.primary
     val hasFolder by link.brainHasFolder.collectAsState()
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         uri?.let { link.setBrainFolder(it) }
@@ -738,8 +869,6 @@ private fun SecondBrainCard(link: LinkManager, onExit: () -> Unit) {
                 )
                 Spacer(Modifier.size(20.dp))
                 Button(onClick = { folderPicker.launch(null) }) { Text("Choose Syncthing folder") }
-                Spacer(Modifier.size(12.dp))
-                TextButton(onClick = onExit) { Text("Back to Android Bridge") }
             }
             return@Box
         }
@@ -751,7 +880,7 @@ private fun SecondBrainCard(link: LinkManager, onExit: () -> Unit) {
             ) {
                 TextButton(onClick = navigateBack) { Text("Back") }
                 Column(Modifier.weight(1f)) {
-                    Text(if (path.isBlank()) "Second Brain" else path.substringAfterLast('/').removeSuffix(".md"), color = text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(if (path.isBlank()) "Second Brain" else displayBrainLabel(path.substringAfterLast('/')), color = text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(if (path.isBlank()) "$folderName • $status" else path, color = muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 if (path.isNotBlank()) {
@@ -797,17 +926,16 @@ private fun SecondBrainCard(link: LinkManager, onExit: () -> Unit) {
         if (drawerOpen) {
             Row(Modifier.fillMaxSize()) {
                 Column(
-                    Modifier.fillMaxHeight().fillMaxWidth().background(panel).padding(12.dp),
+                    Modifier.fillMaxHeight().fillMaxWidth().background(bg).padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(onClick = navigateBack) { Text("Back") }
                         Column(Modifier.weight(1f)) {
-                            Text("Second Brain", color = text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                            Text("Second Brain", color = text, fontSize = 24.sp, fontWeight = FontWeight.Bold)
                             Text("$folderName • $status", color = muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         if (refreshing) {
-                            CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                            CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
                         } else {
                             TextButton(onClick = { link.refreshSecondBrain() }) { Text("Refresh") }
                         }
@@ -822,21 +950,18 @@ private fun SecondBrainCard(link: LinkManager, onExit: () -> Unit) {
                                 if (conflicts == 1) "1 sync conflict copy" else "$conflicts sync conflict copies",
                                 color = Color(0xFFF0B8A8), fontSize = 13.sp, modifier = Modifier.weight(1f),
                             )
-                            Text(
-                                "Keep synced",
-                                color = purple, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                                modifier = Modifier.clickable { link.resolveBrainConflicts() }.padding(4.dp),
-                            )
+                            TextButton(onClick = { link.resolveBrainConflicts() }) { Text("Keep synced") }
                         }
                     }
                     OutlinedTextField(
                         value = query,
                         onValueChange = { query = it; link.searchSecondBrain(it) },
-                        label = { Text("Search notes, #tag") },
+                        placeholder = { Text("Search notes or #tags") },
                         modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(14.dp),
                         singleLine = true,
                     )
-                    Button(
+                    OutlinedButton(
                         onClick = {
                             val newPath = "mobile/${System.currentTimeMillis()}.md"
                             link.saveSecondBrainNode(newPath, "# Mobile note\n") { saved ->
@@ -848,10 +973,14 @@ private fun SecondBrainCard(link: LinkManager, onExit: () -> Unit) {
                             }
                         },
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("New note") }
+                        shape = RoundedCornerShape(14.dp),
+                    ) { Text("＋  New note") }
                     if (query.isNotBlank()) {
-                        LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            items(results) { hit ->
+                        LazyColumn(
+                            Modifier.weight(1f).clip(RoundedCornerShape(16.dp)).background(panel).padding(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            items(results, key = { it.node.path }) { hit ->
                                 Column(
                                     Modifier.fillMaxWidth()
                                         .clip(RoundedCornerShape(8.dp))
@@ -864,7 +993,7 @@ private fun SecondBrainCard(link: LinkManager, onExit: () -> Unit) {
                                         .padding(horizontal = 10.dp, vertical = 8.dp),
                                     verticalArrangement = Arrangement.spacedBy(2.dp),
                                 ) {
-                                    Text(hit.node.label.removeSuffix(".md"), color = text, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(displayBrainLabel(hit.node.label), color = text, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Text(hit.node.path.substringBeforeLast('/', ""), color = muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     if (hit.snippet.isNotBlank()) {
                                         Text(hit.snippet, color = muted, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -876,8 +1005,10 @@ private fun SecondBrainCard(link: LinkManager, onExit: () -> Unit) {
                             }
                         }
                     } else {
-                        LazyColumn(Modifier.weight(1f)) {
-                            items(treeNodes) { node ->
+                        LazyColumn(
+                            Modifier.weight(1f).clip(RoundedCornerShape(16.dp)).background(panel).padding(vertical = 6.dp),
+                        ) {
+                            items(treeNodes, key = { it.path }) { node ->
                                 val selected = node.path == path
                                 val expanded = node.path.trimEnd('/') in expandedFolders
                                 Row(
@@ -895,25 +1026,26 @@ private fun SecondBrainCard(link: LinkManager, onExit: () -> Unit) {
                                                 drawerOpen = false
                                             }
                                         }
-                                        .padding(start = (8 + node.depth * 16).dp, end = 10.dp, top = 10.dp, bottom = 10.dp),
+                                        .heightIn(min = 44.dp)
+                                        .padding(start = (10 + node.depth * 12).dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
                                     if (node.isDirectory) {
                                         Text(if (expanded) "▾" else "▸", color = purple, fontSize = 13.sp)
                                         Text(
-                                            node.label,
+                                            displayBrainLabel(node.label),
                                             color = text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
                                             maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
                                         )
                                         val count = folderNoteCounts[node.path.trimEnd('/')] ?: 0
                                         if (count > 0) Text("$count", color = muted, fontSize = 12.sp)
                                     } else {
-                                        Spacer(Modifier.width(13.dp))
+                                        Text("·", color = purple, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                                         Text(
-                                            node.label.removeSuffix(".md"),
-                                            color = if (selected) text else muted, fontSize = 15.sp,
-                                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                            displayBrainLabel(node.label),
+                                            color = text, fontSize = 15.sp,
+                                            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
                                         )
                                     }
                                 }

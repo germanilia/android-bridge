@@ -32,4 +32,15 @@ class SecondBrainNavigationTest : StringSpec({
         gate.finish()
         gate.tryStart() shouldBe true
     }
+
+    "note labels are readable instead of raw slugs" {
+        displayBrainLabel("castle-crashers-game-review-info.md") shouldBe "Castle crashers game review info"
+        displayBrainLabel("index.md") shouldBe "Overview"
+    }
+
+    "only generated meeting notes appear in the mobile meetings list" {
+        isMirroredMeetingNote("meetings/android-bridge/2026-08-24-client-call.md") shouldBe true
+        isMirroredMeetingNote("meetings/android-bridge/index.md") shouldBe false
+        isMirroredMeetingNote("personal/meeting-notes.md") shouldBe false
+    }
 })
