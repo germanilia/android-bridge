@@ -1,7 +1,10 @@
 package com.androidbridge.core
 
 import com.androidbridge.protocol.Message
+import com.androidbridge.protocol.MAX_CONTROL_BYTES
 import com.androidbridge.protocol.MessageCodec
+import com.androidbridge.protocol.ProtocolErrorCode
+import com.androidbridge.protocol.ProtocolException
 import java.io.DataInputStream
 import java.security.KeyStore
 import java.security.SecureRandom
@@ -18,6 +21,11 @@ import javax.net.ssl.X509TrustManager
  * length-prefixed protocol messages. Rejecting an unpinned peer happens at the TLS layer (CC-SEC).
  * Pure JVM/javax.net.ssl so it is integration-testable in-process (localhost loopback).
  */
+internal fun checkedControlLength(unsignedLength: Long): Int {
+    if (unsignedLength > MAX_CONTROL_BYTES) throw ProtocolException(ProtocolErrorCode.OVERSIZE)
+    return unsignedLength.toInt()
+}
+
 object TlsLink {
     private val KEYSTORE_PASSWORD = "android_bridge".toCharArray()
 
