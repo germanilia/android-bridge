@@ -1,0 +1,13 @@
+service: android-bridge-relay
+image: android-bridge-relay:1.0.0
+ssh_alias: homeserver
+domain: relay.homeserver
+remote_dir: ~/android-bridge-relay
+container_name: android-bridge-relay
+forward_hostname: android-bridge-relay
+forward_port: 8080
+websockets: true
+external_network: system_default
+config_volume: android_bridge_relay_config
+config_mount: /config
+payload_persistence: none

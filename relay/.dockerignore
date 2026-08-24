@@ -1,0 +1,9 @@
+.gradle
+build
+.kotlinc
+*.iml
+.idea
+.env
+*.tar
+*.tar.gz
+deployments/homeserver/.env
