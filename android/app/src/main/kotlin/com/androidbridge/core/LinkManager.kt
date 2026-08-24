@@ -31,6 +31,22 @@ import com.androidbridge.feature.ClipboardSyncPolicy
 import com.androidbridge.feature.Mappers
 import com.androidbridge.protocol.Message
 import com.androidbridge.protocol.MessageTypes
+import com.androidbridge.relay.DirectFirstSessionGate
+import com.androidbridge.relay.EnrollmentResult
+import com.androidbridge.relay.LengthPrefixedRelayMessageAdapter
+import com.androidbridge.relay.RelayConnectionState
+import com.androidbridge.relay.RelayEndpoint
+import com.androidbridge.relay.RelayEnrollmentClient
+import com.androidbridge.relay.RelayEvent
+import com.androidbridge.relay.RelayMessageAdapter
+import com.androidbridge.relay.RelayReconnectBackoff
+import com.androidbridge.relay.RelayRoute
+import com.androidbridge.relay.RelaySettingsRepository
+import com.androidbridge.relay.RelaySettingsView
+import com.androidbridge.relay.RelayUiStatus
+import com.androidbridge.relay.RelayWebSocketTransport
+import com.androidbridge.relay.ReplayClass
+import com.androidbridge.relay.ReplayClassifier
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -67,12 +83,19 @@ class LinkManager(
     private val identity: CertFactory.Identity,
     private val store: SecureStore,
     private val scope: CoroutineScope,
+    private val relayMessageAdapter: RelayMessageAdapter = LengthPrefixedRelayMessageAdapter,
 ) {
     private val nsd = context.getSystemService(Context.NSD_SERVICE) as NsdManager
     private val router = MessageRouter()
-    private val outbox = Channel<Message>(Channel.UNLIMITED)
+    private data class QueuedMessage(val message: Message, val liveGeneration: Long?)
+    private val outbox = Channel<QueuedMessage>(Channel.UNLIMITED)
     private val sendLock = Any()
     private val brainFolder = SecondBrainFolder(context)
+    private val relaySettingsRepository = RelaySettingsRepository(store)
+    private val relayTransport = RelayWebSocketTransport()
+    private val relayEnrollmentClient = RelayEnrollmentClient()
+    private val relaySessionGate = DirectFirstSessionGate()
+    private val relayBackoff = RelayReconnectBackoff()
 
     private val _status = MutableStateFlow(ConnectionState.DISCONNECTED)
     val status: StateFlow<ConnectionState> = _status.asStateFlow()
@@ -113,9 +136,13 @@ class LinkManager(
     val brainHasFolder: StateFlow<Boolean> = _brainHasFolder.asStateFlow()
     private val _brainFolderName = MutableStateFlow(brainFolder.folderName())
     val brainFolderName: StateFlow<String> = _brainFolderName.asStateFlow()
+    private val _relaySettings = MutableStateFlow(relaySettingsView())
+    val relaySettings: StateFlow<RelaySettingsView> = _relaySettings.asStateFlow()
+    private val _relayStatus = MutableStateFlow(RelayUiStatus(RelayConnectionState.DISABLED))
+    val relayStatus: StateFlow<RelayUiStatus> = _relayStatus.asStateFlow()
 
     val fingerprint: String get() = identity.fingerprint
-    val connected: Boolean get() = session != null
+    val connected: Boolean get() = session != null || relaySessionGate.route == RelayRoute.RELAY
 
     private var server: SSLServerSocket? = null
     @Volatile private var session: TlsLink.Session? = null
@@ -123,6 +150,8 @@ class LinkManager(
     private var discoveryListener: NsdManager.DiscoveryListener? = null
     private var incoming: IncomingFile? = null
     @Volatile private var suppressedClipboard: Pair<String, Long>? = null
+    private var relayFallbackJob: Job? = null
+    private var relayReconnectAttempt = 0
 
     private class IncomingFile(val name: String, val size: Int, val buffer: ByteArrayOutputStream = ByteArrayOutputStream())
 
@@ -234,38 +263,57 @@ class LinkManager(
 
     fun start() {
         scope.launch(Dispatchers.IO) { senderLoop() }
+        scope.launch(Dispatchers.IO) { relayEventLoop() }
+        scope.launch(Dispatchers.IO) { relayReceiveLoop() }
         val srv = TlsLink.openServer(identity, 0)
         server = srv
         scope.launch(Dispatchers.IO) { acceptLoop(srv) }
         registerService(srv.localPort)
         startBrowsing()
         _status.value = ConnectionState.DISCOVERING
+        startRelaySelection()
         if (brainFolder.hasFolder()) refreshSecondBrain()
     }
 
     /** Single serialized writer — all outbound messages go through one coroutine so socket writes
      *  never interleave (concurrent writes would corrupt the stream). */
     private suspend fun senderLoop() {
-        for (msg in outbox) {
-            while (session == null) delay(250)
-            val s = session ?: continue
-            runCatching { synchronized(sendLock) { s.send(msg) } }.onFailure {
-                // A dead peer socket must not linger as a zombie session — close it so the
-                // receive loop exits, session clears, and a fresh connection can be adopted.
-                LinkLogger.warn("send_failed", mapOf("err" to (it.message ?: "?")))
-                runCatching { s.close() }
+        for (queued in outbox) {
+            while (scope.isActive) {
+                if (queued.liveGeneration != null && queued.liveGeneration != relaySessionGate.currentGeneration()) break
+                val direct = session
+                if (direct != null && sendDirectSession(direct, queued.message)) break
+                if (relaySessionGate.route == RelayRoute.RELAY && relayTransport.send(relayMessageAdapter.encode(queued.message))) break
+                delay(250)
             }
         }
     }
 
+    private fun sendDirectSession(direct: TlsLink.Session, message: Message): Boolean =
+        runCatching { synchronized(sendLock) { direct.send(message) } }.fold(
+            onSuccess = { true },
+            onFailure = {
+                LinkLogger.warn("send_failed", mapOf("error" to it::class.java.simpleName))
+                runCatching { direct.close() }
+                false
+            },
+        )
+
     private fun send(message: Message) {
         Log.i("AndroidBridge", "tx ${message.type}")
-        outbox.trySend(message)
+        val relayEnabled = relaySettingsRepository.load().enabled
+        val liveOnly = relayEnabled && ReplayClassifier.classify(message.type) == ReplayClass.LIVE_ONLY
+        if (liveOnly && !connected) return
+        outbox.trySend(QueuedMessage(message, if (liveOnly) relaySessionGate.currentGeneration() else null))
     }
 
     private fun sendDirect(message: Message) {
-        val s = session ?: return
-        synchronized(sendLock) { s.send(message) }
+        val direct = session
+        if (direct != null) {
+            synchronized(sendLock) { direct.send(message) }
+        } else if (relaySessionGate.route == RelayRoute.RELAY) {
+            relayTransport.send(relayMessageAdapter.encode(message))
+        }
     }
 
     private suspend fun acceptLoop(srv: SSLServerSocket) {
@@ -282,6 +330,12 @@ class LinkManager(
 
     private fun adopt(s: TlsLink.Session) {
         if (session != null) { runCatching { s.close() }; return }
+        if (relaySettingsRepository.load().enabled) {
+            relaySessionGate.adopt(relaySessionGate.currentGeneration(), RelayRoute.DIRECT)
+            relayTransport.close()
+            relayFallbackJob?.cancel()
+            _relayStatus.value = RelayUiStatus(RelayConnectionState.DIRECT_CONNECTED)
+        }
         session = s
         _status.value = ConnectionState.CONNECTED
         scope.launch(Dispatchers.IO) { receiveLoop(s) }
@@ -309,6 +363,7 @@ class LinkManager(
             session = null
             _peerScreen.value = null
             _status.value = ConnectionState.DISCONNECTED
+            startRelaySelection()
         }
         runCatching { s.close() }
     }
@@ -318,6 +373,137 @@ class LinkManager(
             delay(5000)
             if (session === s) send(Message(id = UUID.randomUUID().toString(), type = MessageTypes.LINK_HEARTBEAT))
         }
+    }
+
+    private fun startRelaySelection() {
+        relayFallbackJob?.cancel()
+        val settings = relaySettingsRepository.load()
+        _relaySettings.value = relaySettingsView()
+        if (!settings.enabled) {
+            val wasRelayConnected = relaySessionGate.route == RelayRoute.RELAY
+            relaySessionGate.invalidate(relaySessionGate.currentGeneration())
+            relayTransport.close()
+            if (wasRelayConnected && session == null) _status.value = ConnectionState.DISCONNECTED
+            _relayStatus.value = RelayUiStatus(RelayConnectionState.DISABLED)
+            return
+        }
+        val endpoint = RelayEndpoint.parse(settings.endpoint).getOrNull()
+        if (endpoint == null || settings.credentials == null) {
+            _relayStatus.value = RelayUiStatus(RelayConnectionState.ENROLLMENT_REQUIRED, "Save an endpoint and enroll this device.")
+            return
+        }
+        relayTransport.close()
+        val generation = relaySessionGate.beginAttempt()
+        if (session != null) {
+            relaySessionGate.adopt(generation, RelayRoute.DIRECT)
+            _relayStatus.value = RelayUiStatus(RelayConnectionState.DIRECT_CONNECTED)
+            return
+        }
+        _relayStatus.value = RelayUiStatus(RelayConnectionState.SEARCHING_DIRECT)
+        relayFallbackJob = scope.launch(Dispatchers.IO) {
+            delay(DIRECT_ATTEMPT_MS)
+            if (session == null && relaySessionGate.currentGeneration() == generation) connectRelay(endpoint, settings.credentials, generation)
+        }
+    }
+
+    private fun connectRelay(endpoint: RelayEndpoint, credentials: com.androidbridge.relay.RelayCredentials, generation: Long) {
+        _relayStatus.value = RelayUiStatus(RelayConnectionState.CONNECTING_RELAY)
+        relayTransport.connect(endpoint, credentials, generation)
+    }
+
+    private suspend fun relayEventLoop() {
+        for (event in relayTransport.events) {
+            if (event.generation != relaySessionGate.currentGeneration()) continue
+            when (event) {
+                is RelayEvent.Open -> adoptRelay(event.generation)
+                is RelayEvent.Closed -> relayDisconnected(event.generation)
+                is RelayEvent.Failure -> relayDisconnected(event.generation)
+            }
+        }
+    }
+
+    private fun adoptRelay(generation: Long) {
+        if (session != null || !relaySessionGate.adopt(generation, RelayRoute.RELAY)) return
+        relayReconnectAttempt = 0
+        _status.value = ConnectionState.CONNECTED
+        _relayStatus.value = RelayUiStatus(RelayConnectionState.RELAY_CONNECTED)
+    }
+
+    private fun relayDisconnected(generation: Long) {
+        if (relaySessionGate.route == RelayRoute.DIRECT) return
+        if (!relaySessionGate.invalidate(generation)) return
+        _status.value = ConnectionState.RECONNECTING
+        _relayStatus.value = RelayUiStatus(RelayConnectionState.RECONNECTING)
+        val reconnectDelay = relayBackoff.delayMs(relayReconnectAttempt++)
+        relayFallbackJob?.cancel()
+        relayFallbackJob = scope.launch(Dispatchers.IO) {
+            delay(reconnectDelay)
+            startRelaySelection()
+        }
+    }
+
+    private suspend fun relayReceiveLoop() {
+        for (frame in relayTransport.inbound) {
+            if (frame.generation != relaySessionGate.currentGeneration() || relaySessionGate.route != RelayRoute.RELAY) continue
+            val message = try {
+                relayMessageAdapter.decode(frame.bytes)
+            } catch (_: Exception) {
+                LinkLogger.securityEvent("relay_frame_reject")
+                relayTransport.close()
+                continue
+            }
+            router.route(message)
+        }
+    }
+
+    fun setRelayEndpoint(endpoint: String): Boolean = runCatching {
+        relaySettingsRepository.saveEndpoint(endpoint)
+        _relaySettings.value = relaySettingsView()
+        if (relaySettingsRepository.load().enabled) startRelaySelection()
+    }.fold(
+        onSuccess = { true },
+        onFailure = {
+            _relayStatus.value = RelayUiStatus(RelayConnectionState.ERROR, "Use a wss:// relay address without credentials or query parameters.")
+            false
+        },
+    )
+
+    fun setRelayEnabled(enabled: Boolean) {
+        relaySettingsRepository.setEnabled(enabled)
+        _relaySettings.value = relaySettingsView()
+        startRelaySelection()
+    }
+
+    fun enrollRelay(setupCode: String) {
+        val endpoint = RelayEndpoint.parse(relaySettingsRepository.load().endpoint).getOrNull()
+        if (endpoint == null) {
+            _relayStatus.value = RelayUiStatus(RelayConnectionState.ERROR, "Save a valid wss:// relay address first.")
+            return
+        }
+        _relayStatus.value = RelayUiStatus(RelayConnectionState.PAUSED, "Enrolling device…")
+        scope.launch(Dispatchers.IO) {
+            runCatching { relayEnrollmentClient.enroll(endpoint, setupCode, deviceName) }.fold(
+                onSuccess = ::finishRelayEnrollment,
+                onFailure = { _relayStatus.value = RelayUiStatus(RelayConnectionState.ERROR, "Enrollment failed. Check the setup code and relay address.") },
+            )
+        }
+    }
+
+    private fun finishRelayEnrollment(result: EnrollmentResult) {
+        relaySettingsRepository.saveEnrollment(result)
+        _relaySettings.value = relaySettingsView()
+        if (relaySettingsRepository.load().enabled) startRelaySelection()
+        else _relayStatus.value = RelayUiStatus(RelayConnectionState.DISABLED, "Enrolled. Enable relay when ready.")
+    }
+
+    fun removeRelayCredentials() {
+        relaySettingsRepository.clearCredentials()
+        _relaySettings.value = relaySettingsView()
+        startRelaySelection()
+    }
+
+    private fun relaySettingsView(): RelaySettingsView = relaySettingsRepository.load().let {
+        RelaySettingsView(it.enabled, it.endpoint, it.credentials != null)
     }
 
     private fun requestScreenShare() {
@@ -650,6 +836,8 @@ class LinkManager(
     }
 
     fun stop() {
+        relayFallbackJob?.cancel()
+        relayTransport.close()
         runCatching { session?.close() }
         runCatching { server?.close() }
         registrationListener?.let { runCatching { nsd.unregisterService(it) } }
@@ -715,5 +903,6 @@ class LinkManager(
         const val SERVICE_TYPE = "_androidbridge._tcp."
         private const val KEY_PAIRED = "paired.fingerprints"
         private const val KEY_CLIPBOARD_AUTO_SYNC = "clipboard.autoSync"
+        private const val DIRECT_ATTEMPT_MS = 5_000L
     }
 }

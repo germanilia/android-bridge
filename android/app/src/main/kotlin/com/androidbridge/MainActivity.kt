@@ -89,6 +89,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -108,6 +109,9 @@ import com.androidbridge.core.parseMarkdown
 import com.androidbridge.core.resolveNoteLink
 import com.androidbridge.core.NearbyPeer
 import com.androidbridge.core.ReceivedFile
+import com.androidbridge.relay.RelayConnectionState
+import com.androidbridge.relay.RelaySettingsView
+import com.androidbridge.relay.RelayUiStatus
 import com.androidbridge.update.AndroidUpdate
 import com.androidbridge.update.AndroidUpdateCoordinator
 import com.androidbridge.update.AndroidUpdateUiState
@@ -395,6 +399,8 @@ private fun HomeScreen(
     val events by link.events.collectAsState()
     val peerScreen by link.peerScreen.collectAsState()
     val receivedFiles by link.receivedFiles.collectAsState()
+    val relaySettings by link.relaySettings.collectAsState()
+    val relayStatus by link.relayStatus.collectAsState()
     val connected = status == ConnectionState.CONNECTED
     val activityExpanded = remember { mutableStateOf(false) }
     val macFullScreen = remember { mutableStateOf(false) }
@@ -453,6 +459,7 @@ private fun HomeScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
         if (selectedTab.value == 3) {
+            RelaySettingsCard(link, relaySettings, relayStatus)
             UpdateSettingsCard(updateState, updateActions)
         } else {
         SectionCard("This device") {
@@ -654,6 +661,68 @@ private fun MeetingsScreen(
             }
         }
     }
+}
+
+@Composable
+private fun RelaySettingsCard(link: LinkManager, settings: RelaySettingsView, status: RelayUiStatus) {
+    var endpoint by rememberSaveable { mutableStateOf(settings.endpoint) }
+    var setupCode by rememberSaveable { mutableStateOf("") }
+    LaunchedEffect(settings.endpoint) { endpoint = settings.endpoint }
+
+    SectionCard("Relay") {
+        Text("Optional direct-first fallback", color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Medium)
+        Text(relayStatusText(status), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("Enable relay", modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurface)
+            Switch(
+                checked = settings.enabled,
+                onCheckedChange = link::setRelayEnabled,
+                enabled = settings.enrolled && settings.endpoint.isNotBlank(),
+            )
+        }
+        OutlinedTextField(
+            value = endpoint,
+            onValueChange = { endpoint = it },
+            label = { Text("WSS endpoint") },
+            placeholder = { Text("wss://relay.homeserver/v1/connect") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedButton(onClick = { link.setRelayEndpoint(endpoint) }, modifier = Modifier.fillMaxWidth()) {
+            Text("Save endpoint")
+        }
+        if (!settings.enrolled) {
+            OutlinedTextField(
+                value = setupCode,
+                onValueChange = { setupCode = it },
+                label = { Text("One-time setup code") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Button(
+                onClick = { link.enrollRelay(setupCode); setupCode = "" },
+                enabled = settings.endpoint.isNotBlank() && setupCode.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Enroll device") }
+        } else {
+            OutlinedButton(onClick = link::removeRelayCredentials, modifier = Modifier.fillMaxWidth()) {
+                Text("Remove relay credential")
+            }
+        }
+    }
+}
+
+private fun relayStatusText(status: RelayUiStatus): String = when (status.state) {
+    RelayConnectionState.DISABLED -> status.message.ifEmpty { "Disabled. Direct LAN behavior is unchanged." }
+    RelayConnectionState.ENROLLMENT_REQUIRED -> status.message
+    RelayConnectionState.SEARCHING_DIRECT -> "Searching for a direct LAN connection"
+    RelayConnectionState.CONNECTING_RELAY -> "Connecting to relay"
+    RelayConnectionState.DIRECT_CONNECTED -> "Connected directly"
+    RelayConnectionState.RELAY_CONNECTED -> "Connected through relay"
+    RelayConnectionState.RECONNECTING -> "Reconnecting. Direct LAN will be tried first."
+    RelayConnectionState.PAUSED -> status.message.ifEmpty { "Paused" }
+    RelayConnectionState.ERROR -> status.message
 }
 
 @Composable
