@@ -18,14 +18,15 @@ import java.net.URI
 value class RelayEndpoint private constructor(val value: String) {
     val webSocketUrl: URI get() = URI(value)
 
-    fun connectionUrl(): HttpUrl = HttpUrl.Builder()
+    private fun baseUrl(): HttpUrl = HttpUrl.Builder()
         .scheme("https")
         .host(webSocketUrl.host)
         .port(if (webSocketUrl.port == -1) 443 else webSocketUrl.port)
-        .encodedPath(webSocketUrl.rawPath.ifEmpty { "/" })
         .build()
 
-    fun enrollmentUrl(): HttpUrl = connectionUrl().newBuilder().encodedPath("/v1/enroll").build()
+    fun connectionUrl(): HttpUrl = baseUrl().newBuilder().encodedPath("/v1/connect").build()
+
+    fun enrollmentUrl(): HttpUrl = baseUrl().newBuilder().encodedPath("/v1/enrollment/invitation").build()
 
     companion object {
         fun parse(raw: String): Result<RelayEndpoint> = runCatching {
@@ -36,6 +37,7 @@ value class RelayEndpoint private constructor(val value: String) {
             require(!uri.host.isNullOrBlank()) { "Relay endpoint must include a host" }
             require(uri.rawUserInfo == null) { "Relay endpoint must not contain credentials" }
             require(uri.rawQuery == null && uri.rawFragment == null) { "Relay endpoint must not contain query or fragment" }
+            require(uri.rawPath.isEmpty() || uri.rawPath == "/") { "Relay endpoint must not contain a path" }
             require(uri.port == -1 || uri.port in 1..65_535) { "Relay endpoint port is invalid" }
             RelayEndpoint(value)
         }
@@ -43,7 +45,7 @@ value class RelayEndpoint private constructor(val value: String) {
 }
 
 @Serializable
-data class RelayCredentials(val deviceId: String, val credential: String, val peerDeviceId: String)
+data class RelayCredentials(val deviceId: String, val credential: String)
 
 data class RelaySettings(
     val enabled: Boolean,
@@ -54,15 +56,14 @@ data class RelaySettings(
 data class RelaySettingsView(val enabled: Boolean, val endpoint: String, val enrolled: Boolean)
 
 @Serializable
-data class EnrollmentResult(val deviceId: String, val credential: String, val peerDeviceId: String)
+data class EnrollmentResult(val deviceId: String, val credential: String)
 
 class RelaySettingsRepository(private val store: SecureStore) {
     fun load(): RelaySettings {
         val deviceId = store.get(KEY_DEVICE_ID)
         val credential = store.get(KEY_CREDENTIAL)
-        val peerDeviceId = store.get(KEY_PEER_ID)
-        val credentials = if (deviceId != null && credential != null && peerDeviceId != null) {
-            RelayCredentials(deviceId, credential, peerDeviceId)
+        val credentials = if (deviceId != null && credential != null) {
+            RelayCredentials(deviceId, credential)
         } else null
         return RelaySettings(store.get(KEY_ENABLED) == "true", store.get(KEY_ENDPOINT).orEmpty(), credentials)
     }
@@ -73,10 +74,9 @@ class RelaySettingsRepository(private val store: SecureStore) {
     }
 
     fun saveEnrollment(result: EnrollmentResult) {
-        require(result.deviceId.isNotBlank() && result.credential.isNotBlank() && result.peerDeviceId.isNotBlank())
+        require(result.deviceId.isNotBlank() && result.credential.isNotBlank())
         store.put(KEY_DEVICE_ID, result.deviceId)
         store.put(KEY_CREDENTIAL, result.credential)
-        store.put(KEY_PEER_ID, result.peerDeviceId)
     }
 
     fun setEnabled(enabled: Boolean) = store.put(KEY_ENABLED, enabled.toString())
@@ -84,7 +84,6 @@ class RelaySettingsRepository(private val store: SecureStore) {
     fun clearCredentials() {
         store.delete(KEY_DEVICE_ID)
         store.delete(KEY_CREDENTIAL)
-        store.delete(KEY_PEER_ID)
         setEnabled(false)
     }
 
@@ -93,7 +92,6 @@ class RelaySettingsRepository(private val store: SecureStore) {
         private const val KEY_ENDPOINT = "relay.endpoint"
         private const val KEY_DEVICE_ID = "relay.deviceId"
         private const val KEY_CREDENTIAL = "relay.credential"
-        private const val KEY_PEER_ID = "relay.peerDeviceId"
     }
 }
 
@@ -101,16 +99,15 @@ class RelayEnrollmentClient(
     private val client: OkHttpClient = OkHttpClient(),
     private val json: Json = Json { ignoreUnknownKeys = false },
 ) {
-    fun enroll(endpoint: RelayEndpoint, setupCode: String, deviceName: String): EnrollmentResult =
-        enrollAt(endpoint.enrollmentUrl(), setupCode, deviceName)
+    fun enroll(endpoint: RelayEndpoint, invitation: String, deviceId: String): EnrollmentResult =
+        enrollAt(endpoint.enrollmentUrl(), invitation, deviceId)
 
-    internal fun enrollAt(url: HttpUrl, setupCode: String, deviceName: String): EnrollmentResult {
-        require(setupCode.length in 1..256) { "Setup code is required" }
-        require(deviceName.length in 1..128) { "Device name is required" }
+    internal fun enrollAt(url: HttpUrl, invitation: String, deviceId: String): EnrollmentResult {
+        require(invitation.length in 16..256) { "Invitation is required" }
+        require(deviceId.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,63}"))) { "Device ID is invalid" }
         val body = buildJsonObject {
-            put("setupCode", setupCode)
-            put("deviceName", deviceName)
-            put("deviceRole", "android")
+            put("deviceId", deviceId)
+            put("invitation", invitation)
         }.toString().toRequestBody(JSON_MEDIA_TYPE)
         val request = Request.Builder().url(url).post(body).build()
         client.newCall(request).execute().use { response ->
@@ -123,9 +120,8 @@ class RelayEnrollmentClient(
             return EnrollmentResult(
                 payload.getValue("deviceId").jsonPrimitive.content,
                 payload.getValue("credential").jsonPrimitive.content,
-                payload.getValue("peerDeviceId").jsonPrimitive.content,
             ).also {
-                require(it.deviceId.length in 1..128 && it.peerDeviceId.length in 1..128)
+                require(it.deviceId.length in 1..64)
                 require(it.credential.length in 1..4_096)
             }
         }

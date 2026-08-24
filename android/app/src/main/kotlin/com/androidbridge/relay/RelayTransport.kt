@@ -43,8 +43,7 @@ class RelayWebSocketTransport(
         val request = Request.Builder()
             .url(url)
             .header("Authorization", "Bearer ${credentials.credential}")
-            .header("X-Android-Bridge-Device-Id", credentials.deviceId)
-            .header("X-Android-Bridge-Peer-Id", credentials.peerDeviceId)
+            .header("X-Device-Id", credentials.deviceId)
             .build()
         socket = client.newWebSocket(request, listener(generation))
     }

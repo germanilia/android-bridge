@@ -1,0 +1,155 @@
+package com.androidbridge.relay
+
+import com.androidbridge.core.DurableSyncJournal
+import com.androidbridge.core.IncomingDisposition
+import com.androidbridge.core.SyncTransferChunker
+import com.androidbridge.core.SyncTransferReassembler
+import com.androidbridge.protocol.CapabilityAnnouncement
+import com.androidbridge.protocol.Message
+import com.androidbridge.protocol.MessageCodec
+import com.androidbridge.protocol.MessageTypes
+import com.androidbridge.protocol.ReplayClassification
+import com.androidbridge.protocol.ReplayClassifier
+import com.androidbridge.protocol.ResumeRequest
+import com.androidbridge.protocol.SyncAcknowledgement
+import com.androidbridge.protocol.SyncCapability
+import com.androidbridge.protocol.SyncCursor
+import com.androidbridge.protocol.SyncModelCodec
+import com.androidbridge.protocol.SyncOperation
+import com.androidbridge.protocol.SyncOperationKind
+import com.androidbridge.protocol.TransferChunk
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.encodeToJsonElement
+import java.util.UUID
+
+internal data class RelayReplayResult(
+    val messages: List<Message> = emptyList(),
+    val outboundFrames: List<ByteArray> = emptyList(),
+)
+
+internal class AndroidRelayReplaySession(
+    private val journal: DurableSyncJournal,
+    private val actorId: String,
+    private val peerActorId: String,
+) {
+    private val incoming = mutableMapOf<String, SyncOperation>()
+    private val reassemblers = mutableMapOf<String, SyncTransferReassembler>()
+    private val ignored = mutableSetOf<String>()
+
+    fun enqueue(message: Message): List<ByteArray> {
+        if (ReplayClassifier.classify(message.type) == ReplayClassification.LIVE_ONLY) {
+            return listOf(MessageCodec.encode(message))
+        }
+        val bytes = MessageCodec.encode(message)
+        val operation = journal.enqueue(
+            operationId = message.id,
+            kind = SyncOperationKind.MESSAGE,
+            target = message.id,
+            content = bytes,
+            messageType = message.type,
+            mediaType = "application/vnd.androidbridge.message",
+        )
+        return operationFrames(operation)
+    }
+
+    fun sessionFrames(): List<ByteArray> {
+        val capability = CapabilityAnnouncement(actorId, listOf(SyncCapability.DURABLE_SYNC, SyncCapability.RESUMABLE_TRANSFER))
+        val resume = ResumeRequest(SyncCursor(peerActorId, journal.receivedThrough(peerActorId)))
+        return buildList {
+            add(frame(MessageTypes.SYNC_CAPABILITIES, capability))
+            add(frame(MessageTypes.SYNC_RESUME, resume))
+            journal.pending().forEach { addAll(operationFrames(it)) }
+        }
+    }
+
+    fun handle(message: Message): RelayReplayResult = when (message.type) {
+        MessageTypes.SYNC_ACK -> {
+            apply(model<SyncAcknowledgement>(message))
+            RelayReplayResult()
+        }
+        MessageTypes.SYNC_RESUME -> resume(model(message))
+        MessageTypes.SYNC_OPERATION -> accept(model<SyncOperation>(message))
+        MessageTypes.SYNC_TRANSFER_CHUNK -> accept(model<TransferChunk>(message))
+        MessageTypes.SYNC_CAPABILITIES -> {
+            model<CapabilityAnnouncement>(message)
+            RelayReplayResult()
+        }
+        else -> RelayReplayResult(messages = listOf(message))
+    }
+
+    private fun resume(request: ResumeRequest): RelayReplayResult {
+        require(request.cursor.actorId == actorId) { "Unexpected relay actor" }
+        return RelayReplayResult(outboundFrames = journal.pending(request.cursor.throughSequence).flatMap(::operationFrames))
+    }
+
+    private fun apply(ack: SyncAcknowledgement) {
+        require(ack.cursor.actorId == actorId) { "Unexpected relay actor" }
+        if (ack.cursor.throughSequence <= journal.acknowledgedThrough) return
+        val operation = journal.pending().firstOrNull { it.sequence == ack.cursor.throughSequence }
+        require(operation?.operationId == ack.operationId) { "Unexpected relay acknowledgement" }
+        journal.acknowledge(ack.cursor.throughSequence)
+    }
+
+    private fun accept(operation: SyncOperation): RelayReplayResult = when (journal.incomingDisposition(operation)) {
+        IncomingDisposition.DUPLICATE -> {
+            ignored += operation.operationId
+            RelayReplayResult(outboundFrames = listOf(acknowledgementFrame(operation)))
+        }
+        IncomingDisposition.GAP -> {
+            ignored += operation.operationId
+            val cursor = SyncCursor(operation.actorId, journal.receivedThrough(operation.actorId))
+            RelayReplayResult(outboundFrames = listOf(frame(MessageTypes.SYNC_RESUME, ResumeRequest(cursor))))
+        }
+        IncomingDisposition.APPLY -> {
+            require(operation.kind == SyncOperationKind.MESSAGE && operation.actorId == peerActorId)
+            val digest = requireNotNull(operation.resultDigest)
+            requireNotNull(operation.blobDigest)
+            incoming[operation.operationId] = operation
+            reassemblers[operation.operationId] = SyncTransferReassembler(operation.operationId, digest)
+            RelayReplayResult()
+        }
+    }
+
+    private fun accept(chunk: TransferChunk): RelayReplayResult {
+        if (chunk.operationId in ignored) {
+            if (chunk.isFinal) ignored -= chunk.operationId
+            return RelayReplayResult()
+        }
+        val operation = requireNotNull(incoming[chunk.operationId]) { "Unknown relay operation" }
+        val reassembler = requireNotNull(reassemblers[chunk.operationId]) { "Unknown relay transfer" }
+        reassembler.accept(chunk)
+        if (!chunk.isFinal) return RelayReplayResult()
+        val original = MessageCodec.decode(reassembler.result())
+        require(original.type == operation.messageType) { "Relay message type mismatch" }
+        val apply = journal.recordApplied(operation)
+        incoming -= chunk.operationId
+        reassemblers -= chunk.operationId
+        return RelayReplayResult(
+            messages = if (apply) listOf(original) else emptyList(),
+            outboundFrames = listOf(acknowledgementFrame(operation)),
+        )
+    }
+
+    private fun operationFrames(operation: SyncOperation): List<ByteArray> = buildList {
+        add(frame(MessageTypes.SYNC_OPERATION, operation))
+        operation.blobDigest?.let { digest ->
+            val bytes = journal.readBlob(digest)
+            SyncTransferChunker.chunk(operation.operationId, bytes, 32_768)
+                .forEach { add(frame(MessageTypes.SYNC_TRANSFER_CHUNK, it)) }
+        }
+    }
+
+    private fun acknowledgementFrame(operation: SyncOperation): ByteArray = frame(
+        MessageTypes.SYNC_ACK,
+        SyncAcknowledgement(SyncCursor(operation.actorId, operation.sequence), operation.operationId),
+    )
+
+    private inline fun <reified T> frame(type: String, model: T): ByteArray {
+        val payload = SyncModelCodec.json.encodeToJsonElement(model) as JsonObject
+        return MessageCodec.encode(Message(UUID.randomUUID().toString(), type, payload = payload))
+    }
+
+    private inline fun <reified T> model(message: Message): T =
+        SyncModelCodec.json.decodeFromJsonElement(message.payload)
+}

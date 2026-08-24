@@ -666,7 +666,7 @@ private fun MeetingsScreen(
 @Composable
 private fun RelaySettingsCard(link: LinkManager, settings: RelaySettingsView, status: RelayUiStatus) {
     var endpoint by rememberSaveable { mutableStateOf(settings.endpoint) }
-    var setupCode by rememberSaveable { mutableStateOf("") }
+    var invitation by rememberSaveable { mutableStateOf("") }
     LaunchedEffect(settings.endpoint) { endpoint = settings.endpoint }
 
     SectionCard("Relay") {
@@ -684,7 +684,7 @@ private fun RelaySettingsCard(link: LinkManager, settings: RelaySettingsView, st
             value = endpoint,
             onValueChange = { endpoint = it },
             label = { Text("WSS endpoint") },
-            placeholder = { Text("wss://relay.homeserver/v1/connect") },
+            placeholder = { Text("wss://relay.homeserver") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
@@ -693,16 +693,16 @@ private fun RelaySettingsCard(link: LinkManager, settings: RelaySettingsView, st
         }
         if (!settings.enrolled) {
             OutlinedTextField(
-                value = setupCode,
-                onValueChange = { setupCode = it },
-                label = { Text("One-time setup code") },
+                value = invitation,
+                onValueChange = { invitation = it },
+                label = { Text("Phone invitation from the Mac") },
                 singleLine = true,
                 visualTransformation = PasswordVisualTransformation(),
                 modifier = Modifier.fillMaxWidth(),
             )
             Button(
-                onClick = { link.enrollRelay(setupCode); setupCode = "" },
-                enabled = settings.endpoint.isNotBlank() && setupCode.isNotBlank(),
+                onClick = { link.enrollRelay(invitation); invitation = "" },
+                enabled = settings.endpoint.isNotBlank() && invitation.isNotBlank(),
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Enroll device") }
         } else {

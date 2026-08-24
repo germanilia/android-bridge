@@ -31,6 +31,8 @@ import com.androidbridge.feature.ClipboardSyncPolicy
 import com.androidbridge.feature.Mappers
 import com.androidbridge.protocol.Message
 import com.androidbridge.protocol.MessageTypes
+import com.androidbridge.protocol.ReplayClassification
+import com.androidbridge.protocol.ReplayClassifier
 import com.androidbridge.relay.DirectFirstSessionGate
 import com.androidbridge.relay.EnrollmentResult
 import com.androidbridge.relay.LengthPrefixedRelayMessageAdapter
@@ -44,9 +46,8 @@ import com.androidbridge.relay.RelayRoute
 import com.androidbridge.relay.RelaySettingsRepository
 import com.androidbridge.relay.RelaySettingsView
 import com.androidbridge.relay.RelayUiStatus
+import com.androidbridge.relay.AndroidRelayReplaySession
 import com.androidbridge.relay.RelayWebSocketTransport
-import com.androidbridge.relay.ReplayClass
-import com.androidbridge.relay.ReplayClassifier
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -92,6 +93,13 @@ class LinkManager(
     private val sendLock = Any()
     private val brainFolder = SecondBrainFolder(context)
     private val relaySettingsRepository = RelaySettingsRepository(store)
+    private val localRelayDeviceId = loadRelayDeviceId()
+    private val relayReplaySession = AndroidRelayReplaySession(
+        DurableSyncJournal(File(context.filesDir, "relay-sync"), localRelayDeviceId),
+        localRelayDeviceId,
+        "mac",
+    )
+    private val relayReplayLock = Any()
     private val relayTransport = RelayWebSocketTransport()
     private val relayEnrollmentClient = RelayEnrollmentClient()
     private val relaySessionGate = DirectFirstSessionGate()
@@ -302,9 +310,19 @@ class LinkManager(
     private fun send(message: Message) {
         Log.i("AndroidBridge", "tx ${message.type}")
         val relayEnabled = relaySettingsRepository.load().enabled
-        val liveOnly = relayEnabled && ReplayClassifier.classify(message.type) == ReplayClass.LIVE_ONLY
-        if (liveOnly && !connected) return
-        outbox.trySend(QueuedMessage(message, if (liveOnly) relaySessionGate.currentGeneration() else null))
+        if (relayEnabled && session == null) {
+            val liveOnly = ReplayClassifier.classify(message.type) == ReplayClassification.LIVE_ONLY
+            if (liveOnly) {
+                if (relaySessionGate.route == RelayRoute.RELAY) relayTransport.send(relayMessageAdapter.encode(message))
+                return
+            }
+            scope.launch(Dispatchers.IO) {
+                val frames = synchronized(relayReplayLock) { relayReplaySession.enqueue(message) }
+                if (relaySessionGate.route == RelayRoute.RELAY) frames.forEach(relayTransport::send)
+            }
+            return
+        }
+        outbox.trySend(QueuedMessage(message, null))
     }
 
     private fun sendDirect(message: Message) {
@@ -427,6 +445,10 @@ class LinkManager(
         relayReconnectAttempt = 0
         _status.value = ConnectionState.CONNECTED
         _relayStatus.value = RelayUiStatus(RelayConnectionState.RELAY_CONNECTED)
+        scope.launch(Dispatchers.IO) {
+            val frames = synchronized(relayReplayLock) { relayReplaySession.sessionFrames() }
+            frames.forEach(relayTransport::send)
+        }
     }
 
     private fun relayDisconnected(generation: Long) {
@@ -452,7 +474,15 @@ class LinkManager(
                 relayTransport.close()
                 continue
             }
-            router.route(message)
+            val result = try {
+                synchronized(relayReplayLock) { relayReplaySession.handle(message) }
+            } catch (_: Exception) {
+                LinkLogger.securityEvent("relay_sync_reject")
+                relayTransport.close()
+                continue
+            }
+            result.messages.forEach(router::route)
+            result.outboundFrames.forEach(relayTransport::send)
         }
     }
 
@@ -474,7 +504,7 @@ class LinkManager(
         startRelaySelection()
     }
 
-    fun enrollRelay(setupCode: String) {
+    fun enrollRelay(invitation: String) {
         val endpoint = RelayEndpoint.parse(relaySettingsRepository.load().endpoint).getOrNull()
         if (endpoint == null) {
             _relayStatus.value = RelayUiStatus(RelayConnectionState.ERROR, "Save a valid wss:// relay address first.")
@@ -482,11 +512,18 @@ class LinkManager(
         }
         _relayStatus.value = RelayUiStatus(RelayConnectionState.PAUSED, "Enrolling device…")
         scope.launch(Dispatchers.IO) {
-            runCatching { relayEnrollmentClient.enroll(endpoint, setupCode, deviceName) }.fold(
+            runCatching { relayEnrollmentClient.enroll(endpoint, invitation, localRelayDeviceId) }.fold(
                 onSuccess = ::finishRelayEnrollment,
-                onFailure = { _relayStatus.value = RelayUiStatus(RelayConnectionState.ERROR, "Enrollment failed. Check the setup code and relay address.") },
+                onFailure = { _relayStatus.value = RelayUiStatus(RelayConnectionState.ERROR, "Enrollment failed. Check the invitation and relay address.") },
             )
         }
+    }
+
+    private fun loadRelayDeviceId(): String {
+        store.get(KEY_RELAY_DEVICE_ID)?.let { return it }
+        val id = "android-${UUID.randomUUID()}"
+        store.put(KEY_RELAY_DEVICE_ID, id)
+        return id
     }
 
     private fun finishRelayEnrollment(result: EnrollmentResult) {
@@ -782,7 +819,7 @@ class LinkManager(
     fun sendFile(name: String, bytes: ByteArray) = sendFileStream(name, bytes.size.toLong(), bytes.inputStream())
 
     fun sendFileStream(name: String, size: Long, input: InputStream) {
-        sendDirect(Message(id = UUID.randomUUID().toString(), type = MessageTypes.FILE_OFFER, payload = buildJsonObject {
+        send(Message(id = UUID.randomUUID().toString(), type = MessageTypes.FILE_OFFER, payload = buildJsonObject {
             put("name", name); put("size", size)
         }))
         input.use { stream ->
@@ -795,13 +832,13 @@ class LinkManager(
                 sent += read
                 val last = size >= 0 && sent >= size
                 val slice = if (read == buffer.size) buffer else buffer.copyOf(read)
-                sendDirect(Message(id = UUID.randomUUID().toString(), type = MessageTypes.FILE_CHUNK, payload = buildJsonObject {
+                send(Message(id = UUID.randomUUID().toString(), type = MessageTypes.FILE_CHUNK, payload = buildJsonObject {
                     put("seq", seq); put("data", Base64.encodeToString(slice, Base64.NO_WRAP)); put("last", last.toString())
                 }))
                 seq++
             }
             if (size < 0) {
-                sendDirect(Message(id = UUID.randomUUID().toString(), type = MessageTypes.FILE_CHUNK, payload = buildJsonObject {
+                send(Message(id = UUID.randomUUID().toString(), type = MessageTypes.FILE_CHUNK, payload = buildJsonObject {
                     put("seq", seq); put("data", ""); put("last", "true")
                 }))
             }
@@ -903,6 +940,7 @@ class LinkManager(
         const val SERVICE_TYPE = "_androidbridge._tcp."
         private const val KEY_PAIRED = "paired.fingerprints"
         private const val KEY_CLIPBOARD_AUTO_SYNC = "clipboard.autoSync"
+        private const val KEY_RELAY_DEVICE_ID = "relay.localDeviceId"
         private const val DIRECT_ATTEMPT_MS = 5_000L
     }
 }

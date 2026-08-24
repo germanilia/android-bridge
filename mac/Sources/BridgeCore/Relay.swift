@@ -438,7 +438,7 @@ public final class RelayReplaySession {
     }
 
     public func enqueue(_ message: Message) throws -> [Data] {
-        guard try ReplayClassifier.classify(message.type) == .durable else {
+        guard try ReplayClassifier.classify(message.type) != .liveOnly else {
             return [try RelaySyncMessageCodec.frame(message)]
         }
         let bytes = Data(try MessageCodec.encode(message))

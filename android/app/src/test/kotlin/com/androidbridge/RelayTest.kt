@@ -45,10 +45,11 @@ import java.nio.file.Files
 
 class RelaySettingsTest : StringSpec({
     "relay endpoint requires secure WebSocket and no embedded secrets" {
-        RelayEndpoint.parse("wss://relay.homeserver/bridge").getOrThrow().webSocketUrl.scheme shouldBe "wss"
-        RelayEndpoint.parse("ws://relay.homeserver/bridge").isFailure shouldBe true
-        RelayEndpoint.parse("wss://user:pass@relay.homeserver/bridge").isFailure shouldBe true
-        RelayEndpoint.parse("wss://relay.homeserver/bridge?token=secret").isFailure shouldBe true
+        RelayEndpoint.parse("wss://relay.homeserver").getOrThrow().webSocketUrl.scheme shouldBe "wss"
+        RelayEndpoint.parse("ws://relay.homeserver").isFailure shouldBe true
+        RelayEndpoint.parse("wss://user:pass@relay.homeserver").isFailure shouldBe true
+        RelayEndpoint.parse("wss://relay.homeserver/bridge").isFailure shouldBe true
+        RelayEndpoint.parse("wss://relay.homeserver?token=secret").isFailure shouldBe true
     }
 
     "settings stay disabled by default and credentials can be removed" {
@@ -56,13 +57,13 @@ class RelaySettingsTest : StringSpec({
         val repository = RelaySettingsRepository(secureStore)
         repository.load().enabled shouldBe false
 
-        repository.saveEndpoint("wss://relay.homeserver/bridge")
-        repository.saveEnrollment(EnrollmentResult("android-1", "credential-1", "mac-1"))
+        repository.saveEndpoint("wss://relay.homeserver")
+        repository.saveEnrollment(EnrollmentResult("android-1", "credential-1"))
         repository.setEnabled(true)
 
         repository.load().let {
             it.enabled shouldBe true
-            it.endpoint shouldBe "wss://relay.homeserver/bridge"
+            it.endpoint shouldBe "wss://relay.homeserver"
             it.credentials shouldNotBe null
         }
 
@@ -75,19 +76,19 @@ class RelaySettingsTest : StringSpec({
 })
 
 class RelayEnrollmentTest : StringSpec({
-    "enrollment posts setup code without putting it in URL" {
+    "enrollment posts invitation without putting it in URL" {
         val server = MockWebServer()
-        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"deviceId":"android-1","credential":"credential-1","peerDeviceId":"mac-1"}"""))
+        server.enqueue(MockResponse().setResponseCode(201).setBody("""{"deviceId":"android-1","credential":"credential-1"}"""))
         server.start()
         try {
             val client = RelayEnrollmentClient()
-            val result = client.enrollAt(server.url("/v1/enroll"), "setup-secret", "Pixel")
-            result shouldBe EnrollmentResult("android-1", "credential-1", "mac-1")
+            val result = client.enrollAt(server.url("/v1/enrollment/invitation"), "invite-1234567890", "android-1")
+            result shouldBe EnrollmentResult("android-1", "credential-1")
             val request = server.takeRequest()
             request.method shouldBe "POST"
-            request.path shouldBe "/v1/enroll"
-            request.body.readUtf8().contains("setup-secret") shouldBe true
-            request.requestUrl.toString().contains("setup-secret") shouldBe false
+            request.path shouldBe "/v1/enrollment/invitation"
+            request.body.readUtf8().contains("invite-1234567890") shouldBe true
+            request.requestUrl.toString().contains("invite-1234567890") shouldBe false
         } finally {
             server.shutdown()
         }
@@ -275,7 +276,7 @@ class RelayWebSocketTransportTest : StringSpec({
         try {
             val transport = RelayWebSocketTransport()
             val url: HttpUrl = server.url("/v1/connect")
-            transport.connectAt(url, RelayCredentials("android-1", "credential-1", "mac-1"), generation = 7)
+            transport.connectAt(url, RelayCredentials("android-1", "credential-1"), generation = 7)
 
             runBlocking {
                 withTimeout(3_000) {
@@ -288,7 +289,7 @@ class RelayWebSocketTransportTest : StringSpec({
             }
             val request = server.takeRequest()
             request.getHeader("Authorization") shouldBe "Bearer credential-1"
-            request.getHeader("X-Android-Bridge-Device-Id") shouldBe "android-1"
+            request.getHeader("X-Device-Id") shouldBe "android-1"
         } finally {
             server.shutdown()
         }
