@@ -7,15 +7,21 @@ import com.androidbridge.core.IncomingDisposition
 import com.androidbridge.core.NoteConflictResolver
 import com.androidbridge.core.SyncJournalError
 import com.androidbridge.core.SyncJournalException
+import com.androidbridge.core.migrateDurableSyncJournal
 import com.androidbridge.core.SyncTransferChunker
 import com.androidbridge.core.SyncTransferReassembler
 import com.androidbridge.protocol.ConflictOutcome
 import com.androidbridge.protocol.MAX_CONTROL_BYTES
+import com.androidbridge.protocol.Message
+import com.androidbridge.protocol.MessageCodec
+import com.androidbridge.protocol.MessageTypes
 import com.androidbridge.protocol.ProtocolErrorCode
 import com.androidbridge.protocol.ProtocolException
 import com.androidbridge.protocol.SyncOperation
+import com.androidbridge.protocol.SyncModelCodec
 import com.androidbridge.protocol.SyncOperationKind
 import io.kotest.assertions.throwables.shouldThrow
+import kotlinx.serialization.decodeFromString
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.property.Arb
@@ -53,6 +59,32 @@ class SyncJournalTest : StringSpec({
             operation.blobDigest shouldBe ContentHash.sha256(bytes)
             DurableSyncJournal(root, "phone").pending() shouldBe listOf(operation)
             DurableSyncJournal(root, "phone").readBlob(operation.blobDigest!!).toList() shouldBe bytes.toList()
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    "legacy random-actor journal migrates pending media into role actor journal" {
+        val root = Files.createTempDirectory("android-bridge-journal-migration").toFile()
+        try {
+            val legacyRoot = root.resolve("relay-sync")
+            val currentRoot = root.resolve("relay-sync-v2")
+            val message = Message("media-1", MessageTypes.MEETING_AUDIO_CHUNK_OFFER)
+            val bytes = MessageCodec.encode(message)
+            DurableSyncJournal(legacyRoot, "android-random").enqueue(
+                "media-1",
+                SyncOperationKind.MESSAGE,
+                "media-1",
+                bytes,
+                messageType = MessageTypes.MEETING_AUDIO_CHUNK_OFFER,
+            )
+
+            val migrated = migrateDurableSyncJournal(legacyRoot, currentRoot, "android-random", "phone")
+
+            migrated.pending().single().actorId shouldBe "phone"
+            val migratedBytes = migrated.readBlob(migrated.pending().single().blobDigest!!)
+            SyncModelCodec.json.decodeFromString<Message>(migratedBytes.decodeToString()) shouldBe message
+            legacyRoot.exists() shouldBe false
         } finally {
             root.deleteRecursively()
         }

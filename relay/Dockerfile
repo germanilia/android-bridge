@@ -1,12 +1,12 @@
-FROM gradle:8.10.2-jdk17-alpine@sha256:bc4cfcd317082aa35b3d5d86bbaa90f958fc3a3088ac8077db9dc443c1a347e7 AS build
+FROM gradle:8.10.2-jdk17-jammy@sha256:c2900027f3f0681c2cbfb09d527813851ad67aeafbb409997297efa2df20e748 AS build
 WORKDIR /workspace
 COPY settings.gradle.kts build.gradle.kts gradle.properties gradle.lockfile ./
 COPY src ./src
 RUN --mount=type=cache,target=/home/gradle/.gradle gradle --no-daemon clean jar
 
-FROM eclipse-temurin:17.0.15_6-jre-alpine@sha256:2f5f20b9dd8f70c30ed1eba9fdf362d2abf4eac45376a29fb7c8a5e919d0da68 AS runtime
-RUN addgroup -S -g 10001 relay \
-    && adduser -S -D -H -u 10001 -G relay relay \
+FROM eclipse-temurin:17.0.15_6-jre-jammy@sha256:c831c9b41c682d013944b2b4fa4b7f59685cd7f237da58f88302f2299fe7aecf AS runtime
+RUN groupadd --gid 10001 relay \
+    && useradd --uid 10001 --gid relay --no-create-home --shell /usr/sbin/nologin relay \
     && mkdir -p /app /config \
     && chown -R relay:relay /app /config
 WORKDIR /app

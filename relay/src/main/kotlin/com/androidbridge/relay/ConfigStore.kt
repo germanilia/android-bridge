@@ -31,8 +31,15 @@ internal class ConfigStore(
     fun snapshot(): RelayState = current
 
     private fun loadOrCreate(setupCode: String, ttlSeconds: Long, clock: Clock): RelayState {
-        if (path.exists()) return json.decodeFromString(path.readText())
         val setup = SetupState(TokenHasher.hash(setupCode), clock.instant().epochSecond + ttlSeconds)
+        if (path.exists()) {
+            val stored = json.decodeFromString<RelayState>(path.readText())
+            return when {
+                stored.setup.consumed -> stored
+                stored.setup.tokenHash == setup.tokenHash -> stored
+                else -> stored.copy(setup = setup).also(::persist)
+            }
+        }
         return RelayState(setup = setup).also(::persist)
     }
 

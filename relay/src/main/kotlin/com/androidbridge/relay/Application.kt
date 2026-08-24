@@ -13,7 +13,7 @@ import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.plugins.statuspages.exception
 import io.ktor.server.request.header
-import io.ktor.server.request.receive
+import io.ktor.server.request.receiveChannel
 import io.ktor.server.request.uri
 import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
@@ -30,8 +30,12 @@ import io.ktor.websocket.WebSocketSession
 import io.ktor.websocket.close
 import io.ktor.websocket.readBytes
 import io.ktor.websocket.send
+import io.ktor.utils.io.readAvailable
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.io.ByteArrayOutputStream
 import java.time.Clock
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -62,7 +66,7 @@ internal fun Application.relayModule(
     installSafeErrors(auditor)
     routing {
         get("/health") { call.respond(HealthResponse("ok")) }
-        enrollmentRoutes(config, enrollment, registry, auditor)
+        enrollmentRoutes(config, enrollment, registry, auditor, json)
         relaySocket(config, enrollment, registry, auditor, json)
     }
 }
@@ -89,25 +93,24 @@ private fun Route.enrollmentRoutes(
     enrollment: EnrollmentService,
     registry: ConnectionRegistry,
     auditor: Auditor,
+    json: Json,
 ) {
     route("/v1") {
         post("/enrollment/setup") {
             call.requireSecure(config)
-            call.requireSmallBody()
-            val request = call.receive<SetupEnrollmentRequest>()
+            val request = call.receiveSmall<SetupEnrollmentRequest>(json)
             val response = enrollment.enrollSetup(request)
             auditor.record("setup_enrollment_succeeded", "created", request.deviceId)
             call.respond(HttpStatusCode.Created, response)
         }
         post("/enrollment/invitation") {
             call.requireSecure(config)
-            call.requireSmallBody()
-            val request = call.receive<InvitationEnrollmentRequest>()
+            val request = call.receiveSmall<InvitationEnrollmentRequest>(json)
             val response = enrollment.enrollInvitation(request)
             auditor.record("invitation_enrollment_succeeded", "created", request.deviceId)
             call.respond(HttpStatusCode.Created, response)
         }
-        authenticatedRoutes(config, enrollment, registry, auditor)
+        authenticatedRoutes(config, enrollment, registry, auditor, json)
     }
 }
 
@@ -116,12 +119,12 @@ private fun Route.authenticatedRoutes(
     enrollment: EnrollmentService,
     registry: ConnectionRegistry,
     auditor: Auditor,
+    json: Json,
 ) {
     post("/invitations") {
         call.requireSecure(config)
-        call.requireSmallBody()
         val device = call.authenticate(enrollment)
-        val response = enrollment.createInvitation(device.deviceId, call.receive<InvitationRequest>())
+        val response = enrollment.createInvitation(device.deviceId, call.receiveSmall<InvitationRequest>(json))
         auditor.record("invitation_created", "created", device.deviceId)
         call.respond(HttpStatusCode.Created, response)
     }
@@ -211,7 +214,25 @@ private fun io.ktor.server.application.ApplicationCall.requireSecure(config: Rel
     }
 }
 
-private fun io.ktor.server.application.ApplicationCall.requireSmallBody() {
-    val length = request.header(HttpHeaders.ContentLength)?.toLongOrNull()
-    if (length != null && length > 4_096) throw RelayException(413, "request_too_large")
+private suspend inline fun <reified T> io.ktor.server.application.ApplicationCall.receiveSmall(json: Json): T {
+    val declaredLength = request.header(HttpHeaders.ContentLength)?.toLongOrNull()
+    if (declaredLength != null && declaredLength > MAX_ENROLLMENT_BODY_BYTES) {
+        throw RelayException(413, "request_too_large")
+    }
+    val input = receiveChannel()
+    val output = ByteArrayOutputStream()
+    val buffer = ByteArray(1_024)
+    while (!input.isClosedForRead) {
+        val count = input.readAvailable(buffer)
+        if (count <= 0) continue
+        if (output.size() + count > MAX_ENROLLMENT_BODY_BYTES) throw RelayException(413, "request_too_large")
+        output.write(buffer, 0, count)
+    }
+    return try {
+        json.decodeFromString(output.toString(Charsets.UTF_8.name()))
+    } catch (_: SerializationException) {
+        throw BadRequestException("invalid_request")
+    }
 }
+
+private const val MAX_ENROLLMENT_BODY_BYTES = 4_096

@@ -7,18 +7,24 @@ import com.androidbridge.core.BrainSyncStorage
 import com.androidbridge.core.ContentHash
 import com.androidbridge.core.DurableSyncJournal
 import com.androidbridge.protocol.ConflictOutcome
+import com.androidbridge.protocol.Message
 import com.androidbridge.protocol.MessageCodec
 import com.androidbridge.protocol.MessageTypes
 import com.androidbridge.protocol.SyncAcknowledgement
 import com.androidbridge.protocol.SyncModelCodec
 import com.androidbridge.protocol.SyncOperation
 import com.androidbridge.protocol.SyncOperationKind
+import com.androidbridge.protocol.TransferChunk
 import com.androidbridge.relay.AndroidRelayReplaySession
 import io.kotest.core.spec.style.StringSpec
 import io.kotest.matchers.collections.shouldHaveSize
 import io.kotest.matchers.shouldBe
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.put
 import java.nio.file.Files
+import java.util.Base64
 
 class BrainSyncTest : StringSpec({
     "scan emits only relative Markdown and validated meeting images, then becomes a no-op" {
@@ -119,9 +125,12 @@ class BrainSyncTest : StringSpec({
             senderJournal.enqueue("snapshot-1", SyncOperationKind.SNAPSHOT, "notes/a.md", "hello".encodeToByteArray(), mediaType = "text/markdown")
             val applied = mutableListOf<String>()
             val receiverJournal = DurableSyncJournal(receiverRoot, "phone")
-            val receiver = AndroidRelayReplaySession(receiverJournal, "phone", "mac") { operation, bytes ->
-                applied += "${operation.target}:${bytes!!.decodeToString()}"
-            }
+            val receiver = AndroidRelayReplaySession(
+                receiverJournal,
+                "phone",
+                "mac",
+                syncOperationApplier = { operation, bytes -> applied += "${operation.target}:${bytes!!.decodeToString()}" },
+            )
             val operationFrames = AndroidRelayReplaySession(senderJournal, "mac", "phone").sessionFrames()
                 .map(MessageCodec::decode)
                 .filter { it.type == MessageTypes.SYNC_OPERATION || it.type == MessageTypes.SYNC_TRANSFER_CHUNK }
@@ -142,21 +151,109 @@ class BrainSyncTest : StringSpec({
         }
     }
 
+    "relay chunks a durable message larger than the control-frame limit" {
+        val senderRoot = Files.createTempDirectory("relay-message-sender").toFile()
+        val receiverRoot = Files.createTempDirectory("relay-message-receiver").toFile()
+        try {
+            val sender = AndroidRelayReplaySession(DurableSyncJournal(senderRoot, "phone"), "phone", "mac")
+            val delivered = mutableListOf<Message>()
+            val receiver = AndroidRelayReplaySession(
+                DurableSyncJournal(receiverRoot, "mac"),
+                "mac",
+                "phone",
+                messageApplier = delivered::add,
+            )
+            val payload = "x".repeat(1_200_000)
+            val message = Message("large-message", MessageTypes.MEETING_PHOTO_OFFER, payload = buildJsonObject { put("data", payload) })
+
+            sender.enqueue(message).map(MessageCodec::decode).forEach(receiver::handle)
+
+            delivered.single() shouldBe message
+        } finally {
+            senderRoot.deleteRecursively()
+            receiverRoot.deleteRecursively()
+        }
+    }
+
+    "relay rejects chunks beyond the operation declared byte count" {
+        val root = Files.createTempDirectory("relay-chunk-limit").toFile()
+        try {
+            val bytes = byteArrayOf(1, 2)
+            val digest = ContentHash.sha256(bytes)
+            val operation = SyncOperation(
+                "oversized-chunk",
+                "mac",
+                1,
+                SyncOperationKind.SNAPSHOT,
+                "notes/a.md",
+                resultDigest = digest,
+                blobDigest = digest,
+                byteCount = 1,
+                mediaType = "text/markdown",
+            )
+            val receiver = AndroidRelayReplaySession(
+                DurableSyncJournal(root, "phone"),
+                "phone",
+                "mac",
+                syncOperationApplier = { _, _ -> },
+            )
+            receiver.handle(syncOperationMessage(operation))
+            val chunk = TransferChunk("oversized-chunk", 0, 0, Base64.getEncoder().encodeToString(bytes), digest, true)
+
+            runCatching { receiver.handle(syncMessage(MessageTypes.SYNC_TRANSFER_CHUNK, chunk)) }.isFailure shouldBe true
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    "relay message callback failure leaves cursor unchanged" {
+        val senderRoot = Files.createTempDirectory("relay-message-failure-sender").toFile()
+        val receiverRoot = Files.createTempDirectory("relay-message-failure-receiver").toFile()
+        try {
+            val sender = AndroidRelayReplaySession(DurableSyncJournal(senderRoot, "phone"), "phone", "mac")
+            val receiverJournal = DurableSyncJournal(receiverRoot, "mac")
+            val receiver = AndroidRelayReplaySession(
+                receiverJournal,
+                "mac",
+                "phone",
+                messageApplier = { error("disk failed") },
+            )
+            val frames = sender.enqueue(Message("message-failure", MessageTypes.SMS_RECEIVED)).map(MessageCodec::decode)
+
+            receiver.handle(frames.first())
+            runCatching { receiver.handle(frames.last()) }.isFailure shouldBe true
+            receiverJournal.receivedThrough("phone") shouldBe 0
+        } finally {
+            senderRoot.deleteRecursively()
+            receiverRoot.deleteRecursively()
+        }
+    }
+
     "relay tombstone acknowledges only after callback and callback failure leaves cursor unchanged" {
         val root = Files.createTempDirectory("brain-relay-tombstone").toFile()
         try {
             val journal = DurableSyncJournal(root, "phone")
             val operation = SyncOperation("delete-1", "mac", 1, SyncOperationKind.TOMBSTONE, "notes/a.md", baseDigest = "a".repeat(64))
             val message = syncOperationMessage(operation)
-            val failing = AndroidRelayReplaySession(journal, "phone", "mac") { _, _ -> error("disk failed") }
+            val failing = AndroidRelayReplaySession(
+                journal,
+                "phone",
+                "mac",
+                syncOperationApplier = { _, _ -> error("disk failed") },
+            )
             runCatching { failing.handle(message) }.isFailure shouldBe true
             journal.receivedThrough("mac") shouldBe 0
 
             var deleted = false
-            val succeeding = AndroidRelayReplaySession(journal, "phone", "mac") { _, bytes ->
-                bytes shouldBe null
-                deleted = true
-            }
+            val succeeding = AndroidRelayReplaySession(
+                journal,
+                "phone",
+                "mac",
+                syncOperationApplier = { _, bytes ->
+                    bytes shouldBe null
+                    deleted = true
+                },
+            )
             val result = succeeding.handle(message)
             deleted shouldBe true
             journal.receivedThrough("mac") shouldBe 1
@@ -225,6 +322,12 @@ private fun syncOperationMessage(operation: SyncOperation) = com.androidbridge.p
     id = "frame-${operation.operationId}",
     type = MessageTypes.SYNC_OPERATION,
     payload = SyncModelCodec.json.encodeToJsonElement(SyncOperation.serializer(), operation) as kotlinx.serialization.json.JsonObject,
+)
+
+private inline fun <reified T> syncMessage(type: String, model: T) = com.androidbridge.protocol.Message(
+    id = "frame-${java.util.UUID.randomUUID()}",
+    type = type,
+    payload = SyncModelCodec.json.encodeToJsonElement(model) as kotlinx.serialization.json.JsonObject,
 )
 
 private fun ByteArray.acknowledgement(): SyncAcknowledgement {

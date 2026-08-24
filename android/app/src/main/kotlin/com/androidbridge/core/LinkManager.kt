@@ -89,12 +89,15 @@ class LinkManager(
     private val nsd = context.getSystemService(Context.NSD_SERVICE) as NsdManager
     private val router = MessageRouter()
     private data class QueuedMessage(val message: Message, val liveGeneration: Long?)
+    private data class RelayOutboundBatch(val generation: Long, val frames: List<ByteArray>)
     private val outbox = Channel<QueuedMessage>(Channel.UNLIMITED)
+    private val relayDurableOutbox = Channel<Message>(Channel.UNLIMITED)
+    private val relayFrameOutbox = Channel<RelayOutboundBatch>(Channel.UNLIMITED)
     private val sendLock = Any()
     private val brainFolder = SecondBrainFolder(context)
     private val relaySettingsRepository = RelaySettingsRepository(store)
     private val localRelayDeviceId = loadRelayDeviceId()
-    private val relaySyncJournal = DurableSyncJournal(File(context.filesDir, "relay-sync"), localRelayDeviceId)
+    private val relaySyncJournal = loadRelaySyncJournal()
     private val brainSync = BrainSyncCoordinator(
         relaySyncJournal,
         BrainSyncManifest(File(context.filesDir, "brain-sync/manifest.json")),
@@ -102,13 +105,16 @@ class LinkManager(
     )
     private val relayReplaySession = AndroidRelayReplaySession(
         relaySyncJournal,
-        localRelayDeviceId,
+        "phone",
         "mac",
-    ) { operation, bytes ->
-        brainSync.applyIncoming(operation, bytes)
-        refreshSecondBrain()
-    }
+        messageApplier = router::route,
+        syncOperationApplier = { operation, bytes ->
+            brainSync.applyIncoming(operation, bytes)
+            refreshSecondBrain()
+        },
+    )
     private val relayReplayLock = Any()
+    @Volatile private var relayReplayReady = false
     private val relayTransport = RelayWebSocketTransport()
     private val relayEnrollmentClient = RelayEnrollmentClient()
     private val relaySessionGate = DirectFirstSessionGate()
@@ -280,6 +286,8 @@ class LinkManager(
 
     fun start() {
         scope.launch(Dispatchers.IO) { senderLoop() }
+        scope.launch(Dispatchers.IO) { relayDurableSenderLoop() }
+        scope.launch(Dispatchers.IO) { relayFrameSenderLoop() }
         scope.launch(Dispatchers.IO) { relayEventLoop() }
         scope.launch(Dispatchers.IO) { relayReceiveLoop() }
         val srv = TlsLink.openServer(identity, 0)
@@ -300,9 +308,41 @@ class LinkManager(
                 if (queued.liveGeneration != null && queued.liveGeneration != relaySessionGate.currentGeneration()) break
                 val direct = session
                 if (direct != null && sendDirectSession(direct, queued.message)) break
-                if (relaySessionGate.route == RelayRoute.RELAY && relayTransport.send(relayMessageAdapter.encode(queued.message))) break
+                if (relaySessionGate.route == RelayRoute.RELAY) {
+                    queueRelayFrames(listOf(relayMessageAdapter.encode(queued.message)))
+                    break
+                }
                 delay(250)
             }
+        }
+    }
+
+    private suspend fun relayDurableSenderLoop() {
+        for (message in relayDurableOutbox) {
+            val frames = try {
+                synchronized(relayReplayLock) {
+                    val queued = relayReplaySession.enqueue(message)
+                    if (relayReplayReady && relaySessionGate.route == RelayRoute.RELAY) queued else emptyList()
+                }
+            } catch (error: Exception) {
+                LinkLogger.warn("relay_journal_failed", mapOf("type" to message.type, "error" to error::class.java.simpleName))
+                pushEvent("⚠️ Could not queue ${message.type} for relay sync")
+                continue
+            }
+            queueRelayFrames(frames)
+        }
+    }
+
+    private suspend fun relayFrameSenderLoop() {
+        for (batch in relayFrameOutbox) {
+            if (batch.generation != relaySessionGate.currentGeneration() || relaySessionGate.route != RelayRoute.RELAY) continue
+            for (frame in batch.frames) if (!relayTransport.send(frame)) break
+        }
+    }
+
+    private fun queueRelayFrames(frames: List<ByteArray>) {
+        if (frames.isNotEmpty()) {
+            relayFrameOutbox.trySend(RelayOutboundBatch(relaySessionGate.currentGeneration(), frames)).getOrThrow()
         }
     }
 
@@ -322,13 +362,10 @@ class LinkManager(
         if (relayEnabled && session == null) {
             val liveOnly = ReplayClassifier.classify(message.type) == ReplayClassification.LIVE_ONLY
             if (liveOnly) {
-                if (relaySessionGate.route == RelayRoute.RELAY) relayTransport.send(relayMessageAdapter.encode(message))
+                if (relaySessionGate.route == RelayRoute.RELAY) queueRelayFrames(listOf(relayMessageAdapter.encode(message)))
                 return
             }
-            scope.launch(Dispatchers.IO) {
-                val frames = synchronized(relayReplayLock) { relayReplaySession.enqueue(message) }
-                if (relaySessionGate.route == RelayRoute.RELAY) frames.forEach(relayTransport::send)
-            }
+            relayDurableOutbox.trySend(message).getOrThrow()
             return
         }
         outbox.trySend(QueuedMessage(message, null))
@@ -339,7 +376,7 @@ class LinkManager(
         if (direct != null) {
             synchronized(sendLock) { direct.send(message) }
         } else if (relaySessionGate.route == RelayRoute.RELAY) {
-            relayTransport.send(relayMessageAdapter.encode(message))
+            queueRelayFrames(listOf(relayMessageAdapter.encode(message)))
         }
     }
 
@@ -358,6 +395,7 @@ class LinkManager(
     private fun adopt(s: TlsLink.Session) {
         if (session != null) { runCatching { s.close() }; return }
         if (relaySettingsRepository.load().enabled) {
+            relayReplayReady = false
             relaySessionGate.adopt(relaySessionGate.currentGeneration(), RelayRoute.DIRECT)
             relayTransport.close()
             relayFallbackJob?.cancel()
@@ -404,6 +442,7 @@ class LinkManager(
 
     private fun startRelaySelection() {
         relayFallbackJob?.cancel()
+        relayReplayReady = false
         val settings = relaySettingsRepository.load()
         _relaySettings.value = relaySettingsView()
         if (!settings.enabled) {
@@ -456,18 +495,19 @@ class LinkManager(
         _status.value = ConnectionState.CONNECTED
         _relayStatus.value = RelayUiStatus(RelayConnectionState.RELAY_CONNECTED)
         scope.launch(Dispatchers.IO) {
-            val frames = synchronized(relayReplayLock) {
+            synchronized(relayReplayLock) {
                 runCatching { brainSync.captureChanges() }
                     .onFailure { brainSyncCaptureFailure(it) }
-                relayReplaySession.sessionFrames()
+                queueRelayFrames(relayReplaySession.sessionFrames())
+                relayReplayReady = true
             }
-            frames.forEach(relayTransport::send)
         }
     }
 
     private fun relayDisconnected(generation: Long) {
         if (relaySessionGate.route == RelayRoute.DIRECT) return
         if (!relaySessionGate.invalidate(generation)) return
+        relayReplayReady = false
         _status.value = ConnectionState.RECONNECTING
         _relayStatus.value = RelayUiStatus(RelayConnectionState.RECONNECTING)
         val reconnectDelay = relayBackoff.delayMs(relayReconnectAttempt++)
@@ -490,14 +530,15 @@ class LinkManager(
                 continue
             }
             val result = try {
-                synchronized(relayReplayLock) { relayReplaySession.handle(message) }
+                synchronized(relayReplayLock) {
+                    relayReplaySession.handle(message).also { queueRelayFrames(it.outboundFrames) }
+                }
             } catch (_: Exception) {
                 LinkLogger.securityEvent("relay_sync_reject")
                 relayTransport.close()
                 continue
             }
             result.messages.forEach(router::route)
-            result.outboundFrames.forEach(relayTransport::send)
         }
     }
 
@@ -533,6 +574,13 @@ class LinkManager(
             )
         }
     }
+
+    private fun loadRelaySyncJournal(): DurableSyncJournal = migrateDurableSyncJournal(
+        File(context.filesDir, "relay-sync"),
+        File(context.filesDir, "relay-sync-v2"),
+        localRelayDeviceId,
+        "phone",
+    )
 
     private fun loadRelayDeviceId(): String {
         store.get(KEY_RELAY_DEVICE_ID)?.let { return it }
@@ -782,11 +830,12 @@ class LinkManager(
     private fun captureBrainChanges() {
         if (!relaySettingsRepository.load().enabled) return
         runCatching {
-            val frames = synchronized(relayReplayLock) {
+            synchronized(relayReplayLock) {
                 val operations = brainSync.captureChanges()
-                if (relaySessionGate.route == RelayRoute.RELAY) relayReplaySession.framesFor(operations) else emptyList()
+                if (relayReplayReady && relaySessionGate.route == RelayRoute.RELAY) {
+                    queueRelayFrames(relayReplaySession.framesFor(operations))
+                }
             }
-            frames.forEach(relayTransport::send)
         }.onFailure { brainSyncCaptureFailure(it) }
     }
 

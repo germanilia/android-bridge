@@ -556,7 +556,11 @@ public final class LinkManager: ObservableObject {
             relayEndpoint = relaySettings.endpoint
             relayWorkspaceId = relaySettings.workspaceId
             relayStatus = relaySettings.enabled ? "Waiting for direct connection" : "Disabled"
-            let replaySession = try RelayReplaySession.applicationSupport(actorId: relaySettings.deviceId)
+            let replaySession = try RelayReplaySession.applicationSupport(
+                actorId: "mac",
+                legacyActorId: relaySettings.deviceId
+            )
+            replaySession.setMessageHandler { [weak self] message in self?.route(message) }
             self.replaySession = replaySession
             brainSync = try SecondBrainDeltaSynchronizer.applicationSupport(store: brainStore, replaySession: replaySession)
         } catch {
@@ -1765,13 +1769,19 @@ public final class LinkManager: ObservableObject {
             })
             return
         }
-        guard relaySettings.enabled, let replaySession else { return }
-        do {
-            let frames = try replaySession.enqueue(message)
-            guard relayConnected else { return }
-            for frame in frames { try relayTransport.send(frame) }
-        } catch {
-            setRelayStatus(error.localizedDescription)
+        queue.async {
+            if self.connection != nil {
+                self.send(message)
+                return
+            }
+            guard self.relaySettings.enabled, let replaySession = self.replaySession else { return }
+            do {
+                let frames = try replaySession.enqueue(message)
+                guard self.relayConnected else { return }
+                for frame in frames { try self.relayTransport.send(frame) }
+            } catch {
+                self.setRelayStatus(error.localizedDescription)
+            }
         }
     }
 

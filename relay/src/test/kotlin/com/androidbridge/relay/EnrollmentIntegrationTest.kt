@@ -7,8 +7,15 @@ import io.kotest.matchers.string.shouldNotContain
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.post
+import io.ktor.client.request.setBody
+import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.contentType
 import io.ktor.server.testing.testApplication
+import java.nio.file.Files
+import java.time.Clock
+import java.time.Instant
+import java.time.ZoneOffset
 import kotlin.io.path.readText
 
 class EnrollmentIntegrationTest : FunSpec({
@@ -28,6 +35,36 @@ class EnrollmentIntegrationTest : FunSpec({
             persisted shouldNotContain "setup-secret"
             persisted shouldNotContain credential
             persisted.contains(TokenHasher.hash(credential)) shouldBe true
+        }
+    }
+
+    test("unconsumed setup code refreshes when relay restarts") {
+        val path = Files.createTempDirectory("relay-config-test").resolve("state.json")
+        ConfigStore(path, "old-code", 60, Clock.systemUTC())
+        val restarted = ConfigStore(path, "new-code", 60, Clock.systemUTC())
+
+        restarted.snapshot().setup.tokenHash shouldBe TokenHasher.hash("new-code")
+    }
+
+    test("same setup code does not regain lifetime after restart") {
+        val path = Files.createTempDirectory("relay-config-expiry-test").resolve("state.json")
+        val initialClock = Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC)
+        val initial = ConfigStore(path, "same-code", 60, initialClock).snapshot().setup.expiresAtEpochSeconds
+        val laterClock = Clock.fixed(Instant.parse("2026-01-02T00:00:00Z"), ZoneOffset.UTC)
+
+        val restarted = ConfigStore(path, "same-code", 60, laterClock)
+
+        restarted.snapshot().setup.expiresAtEpochSeconds shouldBe initial
+    }
+
+    test("enrollment rejects body bytes beyond limit") {
+        testApplication {
+            installTestRelay()
+            val response = client.post("/v1/enrollment/setup") {
+                contentType(ContentType.Application.Json)
+                setBody(ByteArray(4_097) { 'x'.code.toByte() })
+            }
+            response.status shouldBe HttpStatusCode.PayloadTooLarge
         }
     }
 

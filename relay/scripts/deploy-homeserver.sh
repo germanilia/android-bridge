@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Fixed local deployment values intentionally expand before SSH execution.
+# shellcheck disable=SC2029
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,7 +44,11 @@ ssh "$SSH_ALIAS" "docker info >/dev/null && docker network inspect '$NETWORK' >/
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
-SETUP_CODE="${RELAY_SETUP_CODE:-$(openssl rand -base64 32 | tr -d '\n')}"
+EXISTING_SETUP_CODE=""
+if [ "$CLEAN_VOLUME" = "false" ]; then
+  EXISTING_SETUP_CODE="$(ssh "$SSH_ALIAS" "test -f '$DEPLOY_DIR/.env' && sed -n 's/^RELAY_SETUP_CODE=//p' '$DEPLOY_DIR/.env'" || true)"
+fi
+SETUP_CODE="${RELAY_SETUP_CODE:-${EXISTING_SETUP_CODE:-$(openssl rand -base64 32 | tr -d '\n')}}"
 
 echo "Building $IMAGE for $PLATFORM"
 docker build --platform "$PLATFORM" -t "$IMAGE" "$ROOT_DIR"
@@ -93,6 +99,7 @@ cat <<SUMMARY
 Deployment complete.
 One-time setup code: $SETUP_CODE
 Store this code privately. It expires after first use or RELAY_SETUP_TTL_SECONDS.
+A non-clean redeploy preserves this code and its original expiry. Use --clean-volume before enrollment to rotate it.
 
 NPM configuration:
   Domain:           $DOMAIN

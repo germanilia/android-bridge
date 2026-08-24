@@ -18,6 +18,8 @@ import com.androidbridge.protocol.SyncModelCodec
 import com.androidbridge.protocol.SyncOperation
 import com.androidbridge.protocol.SyncOperationKind
 import com.androidbridge.protocol.TransferChunk
+import com.androidbridge.protocol.validate
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
@@ -32,6 +34,7 @@ internal class AndroidRelayReplaySession(
     private val journal: DurableSyncJournal,
     private val actorId: String,
     private val peerActorId: String,
+    private val messageApplier: (Message) -> Unit = { error("No relay message applier configured") },
     private val syncOperationApplier: (SyncOperation, ByteArray?) -> Unit = { _, _ ->
         error("No sync operation applier configured")
     },
@@ -44,7 +47,7 @@ internal class AndroidRelayReplaySession(
         if (ReplayClassifier.classify(message.type) == ReplayClassification.LIVE_ONLY) {
             return listOf(MessageCodec.encode(message))
         }
-        val bytes = MessageCodec.encode(message)
+        val bytes = encodeDurableMessage(message)
         val operation = journal.enqueue(
             operationId = message.id,
             kind = SyncOperationKind.MESSAGE,
@@ -133,20 +136,23 @@ internal class AndroidRelayReplaySession(
         }
         val operation = requireNotNull(incoming[chunk.operationId]) { "Unknown relay operation" }
         val reassembler = requireNotNull(reassemblers[chunk.operationId]) { "Unknown relay transfer" }
+        val chunkSize = chunk.decodedData().size.toLong()
+        require(chunk.offset in 0..operation.byteCount && chunkSize <= operation.byteCount - chunk.offset) {
+            "Relay chunk exceeds declared size"
+        }
         reassembler.accept(chunk)
         if (!chunk.isFinal) return RelayReplayResult()
         val bytes = reassembler.result()
         val original = if (operation.kind == SyncOperationKind.MESSAGE) {
-            MessageCodec.decode(bytes).also { require(it.type == operation.messageType) { "Relay message type mismatch" } }
-        } else {
-            syncOperationApplier(operation, bytes)
-            null
+            decodeDurableMessage(bytes).also { require(it.type == operation.messageType) { "Relay message type mismatch" } }
+        } else null
+        journal.recordApplied(operation) {
+            if (original != null) messageApplier(original) else syncOperationApplier(operation, bytes)
         }
-        val apply = journal.recordApplied(operation)
         incoming -= chunk.operationId
         reassemblers -= chunk.operationId
         return RelayReplayResult(
-            messages = if (apply && original != null) listOf(original) else emptyList(),
+            messages = emptyList(),
             outboundFrames = listOf(acknowledgementFrame(operation)),
         )
     }
@@ -156,7 +162,8 @@ internal class AndroidRelayReplaySession(
     private fun validateIncoming(operation: SyncOperation) {
         when (operation.kind) {
             SyncOperationKind.MESSAGE -> require(
-                operation.messageType != null && operation.resultDigest != null && operation.blobDigest != null,
+                operation.messageType != null && operation.resultDigest != null &&
+                    operation.blobDigest == operation.resultDigest && operation.byteCount in 0..MAX_SYNC_FILE_BYTES,
             )
             SyncOperationKind.SNAPSHOT -> require(
                 operation.messageType == null && operation.resultDigest != null &&
@@ -177,6 +184,18 @@ internal class AndroidRelayReplaySession(
             SyncTransferChunker.chunk(operation.operationId, bytes, 32_768)
                 .forEach { add(frame(MessageTypes.SYNC_TRANSFER_CHUNK, it)) }
         }
+    }
+
+    private fun encodeDurableMessage(message: Message): ByteArray =
+        SyncModelCodec.json.encodeToString(Message.serializer(), message).encodeToByteArray().also {
+            require(it.size <= MAX_SYNC_FILE_BYTES) { "Relay message is too large" }
+        }
+
+    private fun decodeDurableMessage(bytes: ByteArray): Message {
+        require(bytes.size <= MAX_SYNC_FILE_BYTES) { "Relay message is too large" }
+        val message = SyncModelCodec.json.decodeFromString(Message.serializer(), bytes.decodeToString())
+        require(validate(message).valid) { "Invalid relay message" }
+        return message
     }
 
     private fun acknowledgementFrame(operation: SyncOperation): ByteArray = frame(

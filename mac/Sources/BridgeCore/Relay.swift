@@ -433,6 +433,7 @@ public final class RelayReplaySession {
     private var incomingOperations: [String: SyncOperation] = [:]
     private var reassemblers: [String: SyncTransferReassembler] = [:]
     private var ignoredIncomingOperationIds: Set<String> = []
+    private var messageHandler: ((Message) throws -> Void)?
     private var snapshotHandler: ((SyncOperation, Data) throws -> Void)?
     private var tombstoneHandler: ((SyncOperation) throws -> Void)?
 
@@ -442,10 +443,54 @@ public final class RelayReplaySession {
         self.peerActorId = peerActorId
     }
 
-    public static func applicationSupport(actorId: String, peerActorId: String = "phone") throws -> RelayReplaySession {
+    public static func applicationSupport(
+        actorId: String,
+        peerActorId: String = "phone",
+        legacyActorId: String? = nil
+    ) throws -> RelayReplaySession {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let root = support.appendingPathComponent("AndroidBridge/RelaySync", isDirectory: true)
-        return RelayReplaySession(journal: try DurableSyncJournal(rootURL: root, actorId: actorId), actorId: actorId, peerActorId: peerActorId)
+        let currentRoot = support.appendingPathComponent("AndroidBridge/RelaySyncV2", isDirectory: true)
+        let journal = try DurableSyncJournal(rootURL: currentRoot, actorId: actorId)
+        if let legacyActorId {
+            let legacyRoot = support.appendingPathComponent("AndroidBridge/RelaySync", isDirectory: true)
+            try migrateLegacyJournal(from: legacyRoot, actorId: legacyActorId, into: journal)
+        }
+        return RelayReplaySession(journal: journal, actorId: actorId, peerActorId: peerActorId)
+    }
+
+    static func migrateLegacyJournal(
+        from root: URL,
+        actorId: String,
+        into current: DurableSyncJournal
+    ) throws {
+        let state = root.appendingPathComponent("journal.json")
+        guard FileManager.default.fileExists(atPath: state.path) else { return }
+        let legacy = try DurableSyncJournal(rootURL: root, actorId: actorId)
+        let migratedIds = Set(try current.pending().map(\.operationId))
+        for operation in try legacy.pending() where !migratedIds.contains(operation.operationId) {
+            let legacyContent = try operation.blobDigest.map { try legacy.readBlob(digest: $0) }
+            let content: Data?
+            if operation.kind == .message, let legacyContent {
+                content = try JSONEncoder().encode(MessageCodec.decode([UInt8](legacyContent)))
+            } else {
+                content = legacyContent
+            }
+            try current.enqueue(
+                operationId: operation.operationId,
+                kind: operation.kind,
+                target: operation.target,
+                content: content,
+                baseDigest: operation.baseDigest,
+                messageType: operation.messageType,
+                mediaType: operation.mediaType
+            )
+        }
+        try legacy.acknowledge(through: legacy.highWater)
+        try FileManager.default.removeItem(at: root)
+    }
+
+    public func setMessageHandler(_ handler: @escaping (Message) throws -> Void) {
+        messageHandler = handler
     }
 
     public func setSyncOperationHandlers(
@@ -483,7 +528,7 @@ public final class RelayReplaySession {
         guard try ReplayClassifier.classify(message.type) != .liveOnly else {
             return [try RelaySyncMessageCodec.frame(message)]
         }
-        let bytes = Data(try MessageCodec.encode(message))
+        let bytes = try encodeDurableMessage(message)
         let operation = try journal.enqueue(
             operationId: message.id,
             kind: .message,
@@ -561,13 +606,17 @@ public final class RelayReplaySession {
     private func prepare(_ operation: SyncOperation) throws -> RelayReplayResult {
         switch operation.kind {
         case .message:
-            guard operation.messageType != nil, operation.blobDigest == operation.resultDigest,
-                  operation.resultDigest != nil else { throw RelayError.unexpectedMessage }
+            guard messageHandler != nil, operation.messageType != nil, operation.blobDigest == operation.resultDigest,
+                  operation.resultDigest != nil, operation.byteCount >= 0,
+                  operation.byteCount <= Self.maximumSyncFileBytes else {
+                throw RelayError.unexpectedMessage
+            }
             return prepareTransfer(operation)
         case .snapshot:
             guard snapshotHandler != nil, operation.messageType == nil,
                   operation.blobDigest == operation.resultDigest,
-                  operation.resultDigest != nil, operation.mediaType != nil else {
+                  operation.resultDigest != nil, operation.mediaType != nil,
+                  operation.byteCount >= 0, operation.byteCount <= Self.maximumSyncFileBytes else {
                 throw RelayError.unexpectedMessage
             }
             return prepareTransfer(operation)
@@ -606,21 +655,21 @@ public final class RelayReplaySession {
         guard let operation = incomingOperations[chunk.operationId], let reassembler = reassemblers[chunk.operationId] else {
             throw RelayError.unexpectedMessage
         }
+        let chunkSize = Int64(try chunk.decodedData().count)
+        guard chunk.offset >= 0, chunk.offset <= operation.byteCount,
+              chunkSize <= operation.byteCount - chunk.offset else { throw RelayError.unexpectedMessage }
         try reassembler.accept(chunk)
         guard chunk.isFinal else { return RelayReplayResult() }
         let bytes = try reassembler.result()
         guard operation.byteCount == Int64(bytes.count) else { throw RelayError.unexpectedMessage }
-        let messages: [Message]
         let apply: Bool
         switch operation.kind {
         case .message:
-            let original = try MessageCodec.decode([UInt8](bytes))
-            guard original.type == operation.messageType else { throw RelayError.unexpectedMessage }
-            messages = [original]
-            apply = try journal.recordApplied(operation)
+            let original = try decodeDurableMessage(bytes)
+            guard original.type == operation.messageType, let messageHandler else { throw RelayError.unexpectedMessage }
+            apply = try journal.recordApplied(operation, durableApply: { try messageHandler(original) })
         case .snapshot:
             guard let snapshotHandler else { throw RelayError.unexpectedMessage }
-            messages = []
             apply = try journal.recordApplied(operation, durableApply: { try snapshotHandler(operation, bytes) })
         default:
             throw RelayError.unexpectedMessage
@@ -628,11 +677,13 @@ public final class RelayReplaySession {
         incomingOperations.removeValue(forKey: chunk.operationId)
         reassemblers.removeValue(forKey: chunk.operationId)
         return RelayReplayResult(
-            messages: apply ? messages : [],
+            messages: [],
             outboundFrames: [try acknowledgementFrame(operation)],
             appliedOperations: apply && operation.kind == .snapshot ? [operation] : []
         )
     }
+
+    private static let maximumSyncFileBytes: Int64 = 25 * 1024 * 1024
 
     private func operationFrames(_ operation: SyncOperation) throws -> [Data] {
         var frames = [try RelaySyncMessageCodec.frame(RelaySyncMessageCodec.message(type: MessageTypes.syncOperation, model: operation))]
@@ -643,6 +694,19 @@ public final class RelayReplaySession {
             }
         }
         return frames
+    }
+
+    private func encodeDurableMessage(_ message: Message) throws -> Data {
+        let data = try JSONEncoder().encode(message)
+        guard Int64(data.count) <= Self.maximumSyncFileBytes else { throw RelayError.responseTooLarge }
+        return data
+    }
+
+    private func decodeDurableMessage(_ data: Data) throws -> Message {
+        guard Int64(data.count) <= Self.maximumSyncFileBytes else { throw RelayError.responseTooLarge }
+        let message = try JSONDecoder().decode(Message.self, from: data)
+        guard validate(message) == nil else { throw RelayError.unexpectedMessage }
+        return message
     }
 
     private func acknowledgementFrame(_ operation: SyncOperation) throws -> Data {

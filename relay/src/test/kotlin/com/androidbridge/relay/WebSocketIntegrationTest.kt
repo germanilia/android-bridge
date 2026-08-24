@@ -13,6 +13,7 @@ import io.ktor.websocket.close
 import io.ktor.websocket.readBytes
 import io.ktor.websocket.readText
 import io.ktor.websocket.send
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 
 class WebSocketIntegrationTest : FunSpec({
@@ -56,8 +57,13 @@ class WebSocketIntegrationTest : FunSpec({
             val firstPhone = wsClient.authenticatedSession("phone-1", pair.phoneCredential)
             firstPhone.close()
 
-            mac.send(Frame.Binary(true, byteArrayOf(1)))
-            (mac.incoming.receive() as Frame.Text).readText() shouldContain "peer_absent"
+            withTimeout(2_000) {
+                while (true) {
+                    mac.send(Frame.Binary(true, byteArrayOf(1)))
+                    val response = withTimeoutOrNull(100) { mac.incoming.receive() }
+                    if (response is Frame.Text && response.readText().contains("peer_absent")) break
+                }
+            }
 
             val resumedPhone = wsClient.authenticatedSession("phone-1", pair.phoneCredential)
             val resumedPayload = byteArrayOf(4, 5, 6)

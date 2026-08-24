@@ -2,6 +2,8 @@ package com.androidbridge.core
 
 import com.androidbridge.protocol.ConflictOutcome
 import com.androidbridge.protocol.MAX_FRAME_PAYLOAD_BYTES
+import com.androidbridge.protocol.Message
+import com.androidbridge.protocol.MessageCodec
 import com.androidbridge.protocol.SyncOperation
 import com.androidbridge.protocol.SyncOperationKind
 import com.androidbridge.protocol.SyncModelCodec
@@ -15,6 +17,7 @@ import java.security.MessageDigest
 import java.util.Base64
 import java.util.UUID
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
 
 object ContentHash {
     fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
@@ -51,6 +54,38 @@ private data class JournalState(
     val receivedCursors: Map<String, Long> = emptyMap(),
     val receivedOperations: Map<String, ReceivedOperation> = emptyMap(),
 )
+
+fun migrateDurableSyncJournal(
+    legacyRoot: File,
+    currentRoot: File,
+    legacyActorId: String,
+    currentActorId: String,
+): DurableSyncJournal {
+    val current = DurableSyncJournal(currentRoot, currentActorId)
+    if (!File(legacyRoot, "journal.json").isFile) return current
+    val legacy = DurableSyncJournal(legacyRoot, legacyActorId)
+    val migratedIds = current.pending().mapTo(mutableSetOf()) { it.operationId }
+    for (operation in legacy.pending()) {
+        if (operation.operationId in migratedIds) continue
+        val legacyContent = operation.blobDigest?.let(legacy::readBlob)
+        val content = if (operation.kind == SyncOperationKind.MESSAGE && legacyContent != null) {
+            val message = MessageCodec.decode(legacyContent)
+            SyncModelCodec.json.encodeToString(Message.serializer(), message).encodeToByteArray()
+        } else legacyContent
+        current.enqueue(
+            operation.operationId,
+            operation.kind,
+            operation.target,
+            content,
+            operation.baseDigest,
+            operation.messageType,
+            operation.mediaType,
+        )
+    }
+    legacy.acknowledge(legacy.highWater)
+    check(legacyRoot.deleteRecursively()) { "Cannot remove migrated relay journal" }
+    return current
+}
 
 class DurableSyncJournal(private val root: File, private val actorId: String) {
     private val stateFile = File(root, "journal.json")
@@ -147,10 +182,14 @@ class DurableSyncJournal(private val root: File, private val actorId: String) {
     }
 
     @Synchronized
-    fun recordApplied(operation: SyncOperation): Boolean = when (incomingDisposition(operation)) {
+    fun recordApplied(operation: SyncOperation): Boolean = recordApplied(operation) {}
+
+    @Synchronized
+    fun recordApplied(operation: SyncOperation, durableApply: () -> Unit): Boolean = when (incomingDisposition(operation)) {
         IncomingDisposition.DUPLICATE -> false
         IncomingDisposition.GAP -> throw SyncJournalException(SyncJournalError.SEQUENCE_GAP)
         IncomingDisposition.APPLY -> {
+            durableApply()
             commit(state.copy(
                 receivedCursors = state.receivedCursors + (operation.actorId to operation.sequence),
                 receivedOperations = state.receivedOperations +
