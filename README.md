@@ -201,9 +201,11 @@ git config core.hooksPath .githooks
 ```
 
 A push targeting remote `main` updates and relaunches the local Mac app before the remote push. It
-also updates one authorized connected phone with a debug APK. Missing `adb`, no authorized phone,
-or multiple phones without `ANDROID_SERIAL` skip Android. Build, signing, or install failures for
-selected targets block the push. Select one of multiple authorized phones with
+then updates one authorized connected phone with a debug APK when available and deploys the relay
+to the `homeserver` SSH target. Missing `adb`, no authorized phone, or multiple phones without
+`ANDROID_SERIAL` skip only Android; relay deployment still runs. Mac, selected-phone, or relay
+deployment failures block the push. The relay deployment preserves its named configuration volume
+and enrollment state. Select one of multiple authorized phones with
 `ANDROID_SERIAL=<serial> git push ...`. For an intentional emergency bypass, use
 `git push --no-verify`.
 

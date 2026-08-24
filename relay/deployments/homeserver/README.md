@@ -1,6 +1,6 @@
 # Homeserver relay operations
 
-Nginx Proxy Manager routes `relay.homeserver` to `android-bridge-relay:8080` over `system_default`. Enable WebSockets. Do not publish a host port. NPM terminates TLS; clients use `wss://relay.homeserver/v1/connect`.
+The deployment script configures Nginx Proxy Manager to route the homeserver's trusted Tailscale MagicDNS HTTPS name to `android-bridge-relay:8080` over `system_default`, including WebSocket upgrades. It renews the Tailscale certificate during deployment. Do not publish a host port. Use the Mac and Android root endpoints printed by the script; clients append their own API paths.
 
 The named volume `android_bridge_relay_config` contains only setup state, workspace IDs, device IDs, pair mappings, invitation hashes, and credential hashes. The relay never stores forwarded frames.
 

@@ -1,7 +1,7 @@
 service: android-bridge-relay
 image: android-bridge-relay:1.0.0
 ssh_alias: homeserver
-domain: relay.homeserver
+domain: dynamic-tailscale-magicdns
 remote_dir: ~/android-bridge-relay
 container_name: android-bridge-relay
 forward_hostname: android-bridge-relay

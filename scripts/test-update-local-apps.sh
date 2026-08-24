@@ -8,7 +8,8 @@ trap 'rm -rf "$TEMP_ROOT"' EXIT
 TEST_ROOT="$TEMP_ROOT/repository"
 FAKE_BIN="$TEMP_ROOT/bin"
 LOG="$TEMP_ROOT/log"
-mkdir -p "$TEST_ROOT/.githooks" "$TEST_ROOT/scripts" "$TEST_ROOT/mac/scripts" "$TEST_ROOT/android" "$FAKE_BIN"
+mkdir -p "$TEST_ROOT/.githooks" "$TEST_ROOT/scripts" "$TEST_ROOT/mac/scripts" \
+    "$TEST_ROOT/android" "$TEST_ROOT/relay/scripts" "$FAKE_BIN"
 cp "$ROOT/.githooks/pre-push" "$TEST_ROOT/.githooks/pre-push"
 cp "$ROOT/scripts/update-local-apps.sh" "$TEST_ROOT/scripts/update-local-apps.sh"
 
@@ -24,6 +25,11 @@ mkdir -p app/build/outputs/apk/debug
 printf 'apk' > app/build/outputs/apk/debug/app-debug.apk
 SCRIPT
 
+cat > "$TEST_ROOT/relay/scripts/deploy-homeserver.sh" <<'SCRIPT'
+#!/usr/bin/env bash
+printf 'relay\n' >> "$TEST_LOG"
+SCRIPT
+
 cat > "$FAKE_BIN/adb" <<'SCRIPT'
 #!/usr/bin/env bash
 if [ "$1" = devices ]; then
@@ -33,7 +39,8 @@ fi
 printf 'adb %s\n' "$*" >> "$TEST_LOG"
 SCRIPT
 chmod +x "$TEST_ROOT/.githooks/pre-push" "$TEST_ROOT/scripts/update-local-apps.sh" \
-    "$TEST_ROOT/mac/scripts/make-macos-app.sh" "$TEST_ROOT/android/gradlew" "$FAKE_BIN/adb"
+    "$TEST_ROOT/mac/scripts/make-macos-app.sh" "$TEST_ROOT/android/gradlew" \
+    "$TEST_ROOT/relay/scripts/deploy-homeserver.sh" "$FAKE_BIN/adb"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -70,20 +77,24 @@ OID=1111111111111111111111111111111111111111
 reset_log
 run_hook "refs/heads/topic $OID refs/heads/topic $ZERO_OID"
 assert_count mac 0
+assert_count relay 0
 
 reset_log
 run_hook "refs/heads/topic $OID refs/heads/topic $ZERO_OID
 refs/heads/main $OID refs/heads/main $ZERO_OID"
 assert_count mac 1
+assert_count relay 1
 
 reset_log
 run_hook "refs/heads/main $ZERO_OID refs/heads/main $OID"
 assert_count mac 0
+assert_count relay 0
 
 reset_log
 run_updater "/usr/bin:/bin"
 assert_count mac 1
 assert_count gradlew 0
+assert_count relay 1
 
 reset_log
 run_updater "$FAKE_BIN:/usr/bin:/bin" "phone-1 device"
@@ -91,15 +102,18 @@ assert_count mac 1
 assert_count gradlew 1
 grep -Fx "gradlew :app:assembleDebug --no-daemon" "$LOG" >/dev/null || fail "expected debug build"
 grep -Fx "adb -s phone-1 install -r $TEST_ROOT/android/app/build/outputs/apk/debug/app-debug.apk" "$LOG" >/dev/null || fail "expected selected-phone install"
+assert_count relay 1
 
 reset_log
 run_updater "$FAKE_BIN:/usr/bin:/bin" $'phone-1 device\nphone-2 device'
 assert_count gradlew 0
 assert_count adb 0
+assert_count relay 1
 
 reset_log
 run_updater "$FAKE_BIN:/usr/bin:/bin" $'phone-1 device\nphone-2 device' "phone-2"
 assert_count gradlew 1
 grep -Fx "adb -s phone-2 install -r $TEST_ROOT/android/app/build/outputs/apk/debug/app-debug.apk" "$LOG" >/dev/null || fail "expected ANDROID_SERIAL install"
+assert_count relay 1
 
 echo "update-local-apps tests passed"
