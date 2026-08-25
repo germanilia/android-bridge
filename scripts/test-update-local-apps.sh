@@ -102,6 +102,7 @@ assert_count mac 1
 assert_count gradlew 1
 grep -Fx "gradlew :app:assembleDebug --no-daemon" "$LOG" >/dev/null || fail "expected debug build"
 grep -Fx "adb -s phone-1 install -r $TEST_ROOT/android/app/build/outputs/apk/debug/app-debug.apk" "$LOG" >/dev/null || fail "expected selected-phone install"
+grep -Fx "adb -s phone-1 shell am start -n com.androidbridge/.MainActivity" "$LOG" >/dev/null || fail "expected selected-phone relaunch"
 assert_count relay 1
 
 reset_log
@@ -114,6 +115,7 @@ reset_log
 run_updater "$FAKE_BIN:/usr/bin:/bin" $'phone-1 device\nphone-2 device' "phone-2"
 assert_count gradlew 1
 grep -Fx "adb -s phone-2 install -r $TEST_ROOT/android/app/build/outputs/apk/debug/app-debug.apk" "$LOG" >/dev/null || fail "expected ANDROID_SERIAL install"
+grep -Fx "adb -s phone-2 shell am start -n com.androidbridge/.MainActivity" "$LOG" >/dev/null || fail "expected ANDROID_SERIAL relaunch"
 assert_count relay 1
 
 echo "update-local-apps tests passed"

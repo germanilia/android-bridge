@@ -47,7 +47,8 @@ update_android() {
     fi
 
     adb -s "$serial" install -r "$apk"
-    echo "Updated Android app on $serial."
+    adb -s "$serial" shell am start -n com.androidbridge/.MainActivity >/dev/null
+    echo "Updated and relaunched Android app on $serial."
 }
 
 update_android
