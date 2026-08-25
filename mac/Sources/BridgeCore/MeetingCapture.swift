@@ -53,6 +53,79 @@ public struct MeetingRecord: Identifiable, Equatable {
     public let calendarEvent: MeetingCalendarEvent?
 }
 
+public enum MeetingChatRole: String, Codable, Equatable {
+    case user
+    case assistant
+}
+
+public struct MeetingChatMessage: Codable, Equatable, Identifiable {
+    public let id: String
+    public let role: MeetingChatRole
+    public let content: String
+    public let createdAt: Date
+
+    public init(id: String = UUID().uuidString, role: MeetingChatRole, content: String, createdAt: Date = Date()) {
+        self.id = id
+        self.role = role
+        self.content = content
+        self.createdAt = createdAt
+    }
+}
+
+public struct MeetingChatSession: Codable, Equatable, Identifiable {
+    public let id: String
+    public let createdAt: Date
+    public var messages: [MeetingChatMessage]
+
+    public init(id: String = UUID().uuidString, createdAt: Date = Date(), messages: [MeetingChatMessage] = []) {
+        self.id = id
+        self.createdAt = createdAt
+        self.messages = messages
+    }
+}
+
+public struct MeetingChatArchive: Codable, Equatable {
+    public var activeSessionId: String?
+    public var sessions: [MeetingChatSession]
+
+    public init(activeSessionId: String? = nil, sessions: [MeetingChatSession] = []) {
+        self.activeSessionId = activeSessionId
+        self.sessions = sessions
+    }
+
+    public static let empty = MeetingChatArchive()
+    public var activeSession: MeetingChatSession? { sessions.first { $0.id == activeSessionId } }
+}
+
+public enum MeetingChatError: LocalizedError, Equatable {
+    case invalidArchive
+    case unknownSession
+    case persistenceFailed
+    case aiUnavailable
+    case emptyQuestion
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidArchive: return "The saved meeting chat archive is invalid."
+        case .unknownSession: return "The selected chat session no longer exists."
+        case .persistenceFailed: return "The meeting chat could not be saved."
+        case .aiUnavailable: return "The chat AI did not return an answer."
+        case .emptyQuestion: return "Enter a question before sending."
+        }
+    }
+}
+
+/// The title and date the user picked in the merge dialog for the combined meeting.
+public struct MeetingMergeOptions: Equatable {
+    public let title: String
+    public let date: Date
+
+    public init(title: String, date: Date) {
+        self.title = title
+        self.date = date
+    }
+}
+
 public final class MeetingStore {
     /// Placeholder segment text written when a chunk was saved but Whisper failed.
     static let untranscribedMarker = "[Audio chunk saved for local transcription: "
@@ -60,6 +133,7 @@ public final class MeetingStore {
     public static let shared = MeetingStore()
     private let fm = FileManager.default
     private let root: URL
+    private let chatFileName = "chat.json"
 
     public init(root: URL? = nil) {
         let configured = UserDefaults.standard.string(forKey: "meetings.root")?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -376,6 +450,15 @@ public final class MeetingStore {
             .map { "\($0.speaker): \($0.text)" }.joined(separator: "\n")
     }
 
+    private func chatNoteContext(_ meeting: MeetingRecord) -> String {
+        let summary = meeting.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let transcript = usableTranscript(readSegments(in: meeting.url))
+        var sections: [String] = []
+        if !summary.isEmpty { sections.append("Summary:\n\(summary)") }
+        if !transcript.isEmpty { sections.append("Transcript:\n\(transcript)") }
+        return sections.joined(separator: "\n\n")
+    }
+
     public func renameSpeaker(_ meeting: MeetingRecord, from oldName: String, to newName: String) {
         let clean = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !oldName.isEmpty, !clean.isEmpty else { return }
@@ -391,15 +474,115 @@ public final class MeetingStore {
         _ = writeNotes(in: meeting.url, meetingId: meeting.title, photos: [], generateSummary: false)
     }
 
-    public func answerQuestion(_ meeting: MeetingRecord, question: String) -> String? {
-        let transcript = readSegments(in: meeting.url).filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.map { "\($0.speaker): \($0.text)" }.joined(separator: "\n")
-        guard let answer = LLMService(feature: .chat).answer(question: question, transcript: transcript) else { return nil }
+    public func chatArchive(for meeting: MeetingRecord) throws -> MeetingChatArchive {
+        let url = meeting.url.appendingPathComponent(chatFileName)
+        guard fm.fileExists(atPath: url.path) else { return try legacyChatArchive(for: meeting) }
+        do {
+            return try JSONDecoder().decode(MeetingChatArchive.self, from: Data(contentsOf: url))
+        } catch {
+            throw MeetingChatError.invalidArchive
+        }
+    }
+
+    @discardableResult
+    public func startChatSession(_ meeting: MeetingRecord) throws -> MeetingChatArchive {
+        var archive = try chatArchive(for: meeting)
+        let session = MeetingChatSession()
+        archive.sessions.append(session)
+        archive.activeSessionId = session.id
+        try saveChatArchive(archive, for: meeting)
+        return archive
+    }
+
+    @discardableResult
+    public func selectChatSession(_ meeting: MeetingRecord, sessionId: String) throws -> MeetingChatArchive {
+        var archive = try chatArchive(for: meeting)
+        guard archive.sessions.contains(where: { $0.id == sessionId }) else { throw MeetingChatError.unknownSession }
+        archive.activeSessionId = sessionId
+        try saveChatArchive(archive, for: meeting, writeMarkdown: false)
+        return archive
+    }
+
+    public func answerQuestion(
+        _ meeting: MeetingRecord,
+        question: String,
+        onUserStored: (MeetingChatArchive) -> Void = { _ in },
+        responder: (String, String, String) -> String? = { question, note, conversation in
+            LLMService(feature: .chat).answer(question: question, note: note, conversation: conversation)
+        }
+    ) throws -> MeetingChatArchive {
+        let clean = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { throw MeetingChatError.emptyQuestion }
+        var archive = try chatArchive(for: meeting)
+        if archive.activeSession == nil {
+            let session = MeetingChatSession()
+            archive.sessions.append(session)
+            archive.activeSessionId = session.id
+        }
+        guard let index = archive.sessions.firstIndex(where: { $0.id == archive.activeSessionId }) else {
+            throw MeetingChatError.unknownSession
+        }
+        let conversation = conversationText(archive.sessions[index].messages)
+        archive.sessions[index].messages.append(MeetingChatMessage(role: .user, content: clean))
+        try saveChatArchive(archive, for: meeting)
+        onUserStored(archive)
+        let note = chatNoteContext(meeting)
+        guard let answer = responder(clean, note, conversation)?.trimmingCharacters(in: .whitespacesAndNewlines), !answer.isEmpty else {
+            throw MeetingChatError.aiUnavailable
+        }
+        archive.sessions[index].messages.append(MeetingChatMessage(role: .assistant, content: answer))
+        try saveChatArchive(archive, for: meeting)
+        return archive
+    }
+
+    private func legacyChatArchive(for meeting: MeetingRecord) throws -> MeetingChatArchive {
         let url = meeting.url.appendingPathComponent("questions.md")
-        let entry = "## Q: \(question)\n\n\(answer)\n\n"
-        if let data = entry.data(using: .utf8), let fh = try? FileHandle(forWritingTo: url) {
-            fh.seekToEndOfFile(); fh.write(data); try? fh.close()
-        } else { try? entry.write(to: url, atomically: true, encoding: .utf8) }
-        return answer
+        guard fm.fileExists(atPath: url.path) else { return .empty }
+        let text: String
+        do {
+            text = try String(contentsOf: url, encoding: .utf8)
+        } catch {
+            throw MeetingChatError.invalidArchive
+        }
+        let parts = text.components(separatedBy: "## Q: ").dropFirst()
+        var messages: [MeetingChatMessage] = []
+        for (index, part) in parts.enumerated() {
+            let pieces = part.components(separatedBy: "\n\n")
+            let question = (pieces.first ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let answer = pieces.dropFirst().joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            let time = Date(timeIntervalSince1970: TimeInterval(index * 2))
+            if !question.isEmpty { messages.append(MeetingChatMessage(id: "legacy-user-\(index)", role: .user, content: question, createdAt: time)) }
+            if !answer.isEmpty { messages.append(MeetingChatMessage(id: "legacy-assistant-\(index)", role: .assistant, content: answer, createdAt: time.addingTimeInterval(1))) }
+        }
+        guard !messages.isEmpty else { return .empty }
+        let session = MeetingChatSession(id: "legacy", createdAt: .distantPast, messages: messages)
+        return MeetingChatArchive(activeSessionId: session.id, sessions: [session])
+    }
+
+    private func saveChatArchive(_ archive: MeetingChatArchive, for meeting: MeetingRecord, writeMarkdown: Bool = true) throws {
+        do {
+            let chatURL = meeting.url.appendingPathComponent(chatFileName)
+            try JSONEncoder().encode(archive).write(to: chatURL, options: .atomic)
+            if writeMarkdown {
+                try chatMarkdown(archive).write(to: meeting.url.appendingPathComponent("questions.md"), atomically: true, encoding: .utf8)
+            }
+        } catch {
+            throw MeetingChatError.persistenceFailed
+        }
+    }
+
+    private func chatMarkdown(_ archive: MeetingChatArchive) -> String {
+        archive.sessions.enumerated().map { index, session in
+            let messages = session.messages.map { message in
+                let heading = message.role == .user ? "You" : "Assistant"
+                return "### \(heading)\n\n\(message.content)"
+            }.joined(separator: "\n\n")
+            return "## Chat Session \(index + 1)\n\n\(messages)"
+        }.joined(separator: "\n\n") + (archive.sessions.isEmpty ? "" : "\n")
+    }
+
+    private func conversationText(_ messages: [MeetingChatMessage]) -> String {
+        messages.map { "\($0.role == .user ? "You" : "Assistant"): \($0.content)" }.joined(separator: "\n\n")
     }
 
     public func mergeRecordings(
@@ -472,21 +655,33 @@ public final class MeetingStore {
         }
     }
 
-    public func mergeMeetings(_ records: [MeetingRecord]) -> URL? {
-        guard records.count >= 2 else { return nil }
-        let title = records.map(\.title).joined(separator: " + ")
-        let id = "\(DateFormatter.meetingFolder.string(from: Date())) - \(safe(title))"
+    /// Combines several meetings into one folder using the title and date the user chose.
+    /// `progress` reports each step so the UI can show what is happening; the AI summary at
+    /// the end is the slow part and can take minutes on a local model.
+    public func mergeMeetings(
+        _ records: [MeetingRecord],
+        options: MeetingMergeOptions,
+        progress: (String) -> Void = { _ in }
+    ) -> URL? {
+        let title = options.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard records.count >= 2, !title.isEmpty else { return nil }
+        let id = "\(DateFormatter.meetingFolder.string(from: options.date)) - \(safe(title))"
         let dir = root.appendingPathComponent(id, isDirectory: true)
         let media = dir.appendingPathComponent("media", isDirectory: true)
         try? fm.createDirectory(at: media, withIntermediateDirectories: true)
         var transcript = ""
-        for record in records {
+        for (index, record) in records.enumerated() {
+            progress("Copying files from \(record.title) (\(index + 1)/\(records.count))…")
             let sourceMedia = record.url.appendingPathComponent("media", isDirectory: true)
             let files = (try? fm.contentsOfDirectory(at: sourceMedia, includingPropertiesForKeys: nil)) ?? []
             for file in files { try? fm.copyItem(at: file, to: media.appendingPathComponent("\(safe(record.title))-\(file.lastPathComponent)")) }
             transcript += (try? String(contentsOf: record.url.appendingPathComponent("transcript.jsonl"), encoding: .utf8)) ?? ""
         }
+        progress("Combining transcripts…")
         try? transcript.write(to: dir.appendingPathComponent("transcript.jsonl"), atomically: true, encoding: .utf8)
+        _ = write(title, to: dir.appendingPathComponent("title.txt"))
+        _ = write(String(Int(options.date.timeIntervalSince1970 * 1000)), to: dir.appendingPathComponent("startedAt.txt"))
+        progress("Writing the combined summary with AI — this can take a few minutes…")
         _ = writeNotes(in: dir, meetingId: title, photos: [], generateSummary: true)
         return dir
     }
@@ -869,8 +1064,10 @@ public struct LLMService {
         run("Create a short meaningful meeting title, 3 to 7 words. Return only the title. Do not include thinking or punctuation.\n\nTranscript:\n\(transcript)", feature: feature)
     }
 
-    public func answer(question: String, transcript: String) -> String? {
-        run("Answer the question using only this meeting transcript. If the transcript does not contain the answer, say so briefly. Return only the answer.\n\nQuestion: \(question)\n\nTranscript:\n\(transcript)", feature: feature)
+    public func answer(question: String, note: String, conversation: String = "") -> String? {
+        let history = conversation.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prior = history.isEmpty ? "" : "\n\nPrior conversation:\n\(history)\n"
+        return run("This is a continued conversation about one meeting note. Use only meeting-note evidence, retain relevant context from the prior conversation, and acknowledge briefly when the meeting note does not contain an answer. Return only the answer.\(prior)\nNew user message:\n\(question)\n\nMeeting note:\n\(note)", feature: feature)
     }
 
     private struct GenerateRequest: Encodable {

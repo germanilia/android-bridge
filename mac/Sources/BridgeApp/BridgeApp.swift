@@ -238,6 +238,14 @@ struct MeetingCaptureTab: View {
     @Binding var selectedMeetingId: String?
     @Binding var showRawMarkdown: Bool
     @State private var sortByCompany = false
+    @State private var showMergeSheet = false
+    @State private var mergeTitle = ""
+    @State private var mergeDate = Date()
+
+    /// Meetings ticked for merging, oldest first, so the first one supplies the default title and date.
+    private var mergeCandidates: [MeetingRecord] {
+        link.meetings.filter { selectedMeetings.contains($0.id) }.sorted { $0.date < $1.date }
+    }
 
     private var filteredMeetings: [MeetingRecord] {
         let q = meetingSearch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -335,12 +343,35 @@ struct MeetingCaptureTab: View {
                     )
                     .tag(meeting.id)
                 }
-                Button { link.mergeMeetings(link.meetings.filter { selectedMeetings.contains($0.id) }); selectedMeetings.removeAll() } label: {
+                Button {
+                    mergeTitle = mergeCandidates.first?.title ?? ""
+                    mergeDate = mergeCandidates.first?.date ?? Date()
+                    showMergeSheet = true
+                } label: {
                     Label("Merge selected", systemImage: "arrow.triangle.merge")
-                }.disabled(selectedMeetings.count < 2)
+                }.disabled(selectedMeetings.count < 2 || link.mergeStatus != nil)
+                if let status = link.mergeStatus {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text(status).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
             }
             .padding()
             .frame(minWidth: 300, idealWidth: 380, maxWidth: 560)
+            .sheet(isPresented: $showMergeSheet) {
+                MergeMeetingsSheet(
+                    meetings: mergeCandidates,
+                    title: $mergeTitle,
+                    date: $mergeDate,
+                    onCancel: { showMergeSheet = false },
+                    onMerge: {
+                        link.mergeMeetings(mergeCandidates, options: MeetingMergeOptions(title: mergeTitle, date: mergeDate))
+                        selectedMeetings.removeAll()
+                        showMergeSheet = false
+                    }
+                )
+            }
 
             if let meeting = selectedMeeting {
                 MeetingPreview(
@@ -447,6 +478,62 @@ struct CustomerChoiceSheet: View {
         }
         .padding(24)
         .frame(width: 460)
+    }
+}
+
+/// Asks which title and date the combined meeting should carry before merging.
+struct MergeMeetingsSheet: View {
+    let meetings: [MeetingRecord]
+    @Binding var title: String
+    @Binding var date: Date
+    let onCancel: () -> Void
+    let onMerge: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Merge \(meetings.count) meetings").font(.title3).bold()
+            Text("Every recording, photo, and transcript is kept. Choose the title and date the merged note should carry.")
+                .font(.caption).foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Title").font(.caption).bold()
+                TextField("Merged meeting title", text: $title).textFieldStyle(.roundedBorder)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(meetings) { meeting in
+                            Button(meeting.title) { title = meeting.title }.buttonStyle(.link)
+                        }
+                        Button("All titles") { title = meetings.map(\.title).joined(separator: " + ") }.buttonStyle(.link)
+                    }.font(.caption)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Date").font(.caption).bold()
+                DatePicker("", selection: $date, displayedComponents: [.date, .hourAndMinute]).labelsHidden()
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(meetings) { meeting in
+                            Button(meeting.date.formatted(date: .abbreviated, time: .shortened)) { date = meeting.date }.buttonStyle(.link)
+                        }
+                        Button("Now") { date = Date() }.buttonStyle(.link)
+                    }.font(.caption)
+                }
+            }
+
+            Text("After merging, the AI writes one combined summary. On a local model that step can take a few minutes — progress is shown in the meetings list.")
+                .font(.caption).foregroundStyle(.secondary)
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { onCancel() }
+                Button("Merge") { onMerge() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 480)
     }
 }
 
@@ -572,11 +659,12 @@ struct MeetingPreview: View {
     @State private var editingTitle = false
     @State private var editingCompany = false
     @State private var showBrainPrompt = false
-    @State private var showAskDialog = false
-    @State private var noteMarkdown = ""
+    @State private var noteMarkdown: String?
+    @State private var noteMarkdownIdentity = ""
     @AppStorage("secondBrainClient") private var brainClient = ""
 
     private var notesURL: URL { meeting.notesURL ?? meeting.url.appendingPathComponent("notes.md") }
+    private var noteIdentity: String { notesURL.path + (meeting.notesUpdatedAt?.description ?? "") }
 
     private var customerSheetPresented: Binding<Bool> {
         Binding(
@@ -592,13 +680,13 @@ struct MeetingPreview: View {
     var body: some View {
         GeometryReader { proxy in
             VStack(spacing: 0) {
-                noteControlBar
+                meetingToolbar
                     .padding(.horizontal)
                     .padding(.top, 10)
                     .padding(.bottom, 6)
                 Divider()
                 ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+                LazyVStack(alignment: .leading, spacing: 16) {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading) {
                         HStack {
@@ -641,30 +729,7 @@ struct MeetingPreview: View {
 
                     }
                     Spacer()
-                    Menu("Copy") {
-                        Button("Entire summary") { copy(meeting.summary) }
-                        Button("Transcript") { copy(meeting.transcript) }
-                        Button("Chat") { copy(meeting.questions) }
-                        Button("Full note") { copy(noteMarkdown) }
-                    }
-                    Button {
-                        if !meeting.company.isEmpty { brainClient = meeting.company }
-                        showBrainPrompt = true
-                    } label: {
-                        if link.brainTransferIds.contains(meeting.id) {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Label("Second Brain", systemImage: "brain.head.profile")
-                        }
-                    }
-                    .disabled(link.brainTransferIds.contains(meeting.id))
-                    Button { link.retranscribeMeeting(meeting) } label: { Label("Re-transcribe", systemImage: "waveform") }
-                        .help("Run Whisper again over the saved audio chunks and rebuild the notes")
-                        .disabled(link.regeneratingSummaryIds.contains(meeting.id))
-                    Button { link.shareMeeting(meeting) } label: { Label("Share", systemImage: "square.and.arrow.up") }
-                    Button(role: .destructive) { link.deleteMeeting(meeting) } label: { Label("Delete", systemImage: "trash") }
                 }
-                .padding(.trailing, 190)
                 .sheet(isPresented: customerSheetPresented) {
                     if link.customerPromptMeetingId == meeting.id {
                         CustomerChoiceSheet(
@@ -687,6 +752,72 @@ struct MeetingPreview: View {
                             onCancel: { showBrainPrompt = false }
                         )
                     }
+                }
+
+                SectionBox("Note") {
+                    Group {
+                    if noteTab == "Summary" {
+                        // Cap the line length — full-window paragraphs are unreadable.
+                        if meeting.summary.isEmpty {
+                            let message = meeting.isActive
+                                ? "Live summary will appear after the first recorded chunk is transcribed."
+                                : meeting.transcript.isEmpty
+                                    ? "No transcript is available yet. Re-transcribe the saved audio chunks."
+                                    : "Transcript captured and available in the Transcript tab. Summary generation failed; check the Summarize model or retry."
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text(message).foregroundStyle(.secondary)
+                                if !meeting.transcript.isEmpty, !meeting.isActive {
+                                    Button("Generate Missing Summary") { link.regenerateMeetingSummary(meeting) }
+                                        .disabled(link.regeneratingSummaryIds.contains(meeting.id))
+                                }
+                            }
+                        } else {
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Spacer(minLength: 0)
+                                    Button { copy(meeting.summary) } label: {
+                                        Label("Copy summary", systemImage: "doc.on.doc")
+                                    }
+                                    .help("Copy the whole summary. You can also click the text and press ⌘A then ⌘C.")
+                                }
+                                SelectableNoteText(text: meeting.summary)
+                                    .frame(maxWidth: 760, alignment: .leading)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    } else if noteTab == "Transcript" {
+                        if meeting.transcript.isEmpty {
+                            Text("Transcript is still empty.")
+                        } else {
+                            TranscriptTextView(text: meeting.transcript)
+                        }
+                    } else if noteTab == "Chat" {
+                        MeetingChatView(
+                            archive: link.meetingChats[meeting.id] ?? .empty,
+                            draft: $question,
+                            isSending: link.meetingChatBusyIds.contains(meeting.id),
+                            error: link.meetingChatErrors[meeting.id],
+                            onSend: onAsk,
+                            onNewSession: { link.startMeetingChatSession(meeting) },
+                            onSelectSession: { link.selectMeetingChatSession(meeting, sessionId: $0) }
+                        )
+                    } else if noteTab == "Events" {
+                        EventLogView(events: link.events)
+                    } else if let noteMarkdown, noteMarkdownIdentity == noteIdentity {
+                        Toggle("Show raw Markdown", isOn: $showRawMarkdown)
+                        if showRawMarkdown {
+                            Text(markdownPreviewText(noteMarkdown)).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                        } else {
+                            MeetingFullNotePreview(markdown: noteMarkdown, baseURL: meeting.url)
+                        }
+                    } else {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Loading full note…").foregroundStyle(.secondary)
+                        }
+                    }
+                    }
+                    .transition(.opacity)
                 }
 
                 SectionBox("Calendar") {
@@ -772,55 +903,6 @@ struct MeetingPreview: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
-                SectionBox("Note") {
-                    Group {
-                    if noteTab == "Summary" {
-                        // Cap the line length — full-window paragraphs are unreadable.
-                        if meeting.summary.isEmpty {
-                            let message = meeting.isActive
-                                ? "Live summary will appear after the first recorded chunk is transcribed."
-                                : meeting.transcript.isEmpty
-                                    ? "No transcript is available yet. Re-transcribe the saved audio chunks."
-                                    : "Transcript captured and available in the Transcript tab. Summary generation failed; check the Summarize model or retry."
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text(message).foregroundStyle(.secondary)
-                                if !meeting.transcript.isEmpty, !meeting.isActive {
-                                    Button("Generate Missing Summary") { link.regenerateMeetingSummary(meeting) }
-                                        .disabled(link.regeneratingSummaryIds.contains(meeting.id))
-                                }
-                            }
-                        } else {
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack {
-                                    Spacer(minLength: 0)
-                                    Button { copy(meeting.summary) } label: {
-                                        Label("Copy summary", systemImage: "doc.on.doc")
-                                    }
-                                    .help("Copy the whole summary. You can also click the text and press ⌘A then ⌘C.")
-                                }
-                                SelectableNoteText(text: meeting.summary)
-                                    .frame(maxWidth: 760, alignment: .leading)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    } else if noteTab == "Transcript" {
-                        Text(meeting.transcript.isEmpty ? "Transcript is still empty." : meeting.transcript)
-                            .font(.system(.body, design: .monospaced)).textSelection(.enabled)
-                    } else if noteTab == "Chat" {
-                        ChatQAView(text: meeting.questions)
-                    } else if noteTab == "Events" {
-                        EventLogView(events: link.events)
-                    } else {
-                        Toggle("Show raw Markdown", isOn: $showRawMarkdown)
-                        if showRawMarkdown {
-                            Text(markdownPreviewText(noteMarkdown)).font(.system(.body, design: .monospaced)).textSelection(.enabled)
-                        } else {
-                            MeetingFullNotePreview(markdown: noteMarkdown, baseURL: meeting.url)
-                        }
-                    }
-                    }
-                    .transition(.opacity)
-                }
 
                 if !meeting.imageFiles.isEmpty {
                     SectionBox("Images") {
@@ -838,98 +920,134 @@ struct MeetingPreview: View {
                     .padding()
                     .frame(minWidth: proxy.size.width, maxWidth: .infinity, alignment: .topLeading)
                 }
-                askNoteBox
-                    .padding([.horizontal, .bottom])
             }
         }
         .frame(minWidth: 560, maxWidth: .infinity, alignment: .topLeading)
         .layoutPriority(1)
-        .task(id: notesURL.path + (meeting.notesUpdatedAt?.description ?? "")) { loadMarkdown() }
+        .task(id: noteIdentity + noteTab) {
+            if noteTab == "Full note" { await loadMarkdown() }
+        }
+        .task(id: meeting.id) { link.loadMeetingChat(meeting) }
         .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { if meeting.isActive { now = $0 } }
     }
 
-    private func loadMarkdown() {
-        noteMarkdown = (try? String(contentsOf: notesURL, encoding: .utf8)) ?? ""
+    private func readMarkdown() async -> String {
+        let url = notesURL
+        return await Task.detached(priority: .userInitiated) {
+            (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        }.value
     }
 
-    /// Single pinned row above the scroll area: note-section tabs plus, on the
-    /// Summary tab, the language/type pickers and the regenerate status.
-    private var noteControlBar: some View {
-        HStack(spacing: 12) {
-            Picker("Note section", selection: Binding(
-                get: { noteTab },
-                set: { value in withAnimation(.easeInOut(duration: 0.2)) { noteTab = value } }
-            )) {
-                Text("Summary").tag("Summary")
-                Text("Transcript").tag("Transcript")
-                Text("Full note").tag("Full note")
-                Text("Chat").tag("Chat")
-                Text("Events").tag("Events")
+    private func loadMarkdown() async {
+        let identity = noteIdentity
+        noteMarkdown = nil
+        noteMarkdownIdentity = ""
+        let markdown = await readMarkdown()
+        guard !Task.isCancelled, identity == noteIdentity else { return }
+        noteMarkdown = markdown
+        noteMarkdownIdentity = identity
+    }
+
+    private func copyFullNote() {
+        Task {
+            let markdown: String
+            if noteMarkdownIdentity == noteIdentity, let noteMarkdown {
+                markdown = noteMarkdown
+            } else {
+                markdown = await readMarkdown()
             }
-            .labelsHidden()
-            .pickerStyle(.segmented)
-            .frame(maxWidth: 420)
-            if noteTab == "Summary" {
-                Picker("Summary language", selection: Binding(get: { summaryLanguage }, set: { summaryLanguage = $0; link.regenerateMeetingSummary(meeting) })) {
-                    Text("Original").tag("Original")
-                    Text("Hebrew").tag("Hebrew")
-                    Text("English").tag("English")
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .frame(width: 230)
-                Picker("Summary type", selection: Binding(get: { summaryType }, set: { summaryType = $0; link.regenerateMeetingSummary(meeting) })) {
-                    Text("Detailed").tag("Detailed")
-                    Text("Short").tag("Short")
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .frame(width: 150)
-                if link.regeneratingSummaryIds.contains(meeting.id) {
-                    ProgressView().controlSize(.small)
-                    Text("Regenerating…").font(.caption).foregroundStyle(.secondary)
-                } else if let updated = meeting.notesUpdatedAt {
-                    Text("Updated \(updated.formatted(date: .abbreviated, time: .shortened))")
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
-            }
-            Spacer(minLength: 0)
+            guard !Task.isCancelled else { return }
+            copy(markdown)
         }
     }
 
-    private var askNoteBox: some View {
-        HStack(spacing: 10) {
-            Button { showAskDialog = true } label: {
-                Label("Ask this note", systemImage: "bubble.left.and.bubble.right.fill")
-                    .padding(.horizontal, 8)
-            }
-            .buttonStyle(.borderedProminent)
-            .popover(isPresented: $showAskDialog, arrowEdge: .bottom) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Ask this note").font(.headline)
-                    HStack(alignment: .bottom) {
-                        TextField("Ask a question about this meeting", text: $question, axis: .vertical)
-                            .textFieldStyle(.roundedBorder)
-                        Button("Send") { onAsk() }.disabled(question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }
-                    HStack {
-                        Button("Copy chat") { copy(meeting.questions) }.disabled(meeting.questions.isEmpty)
-                        Button("Copy transcript") { copy(meeting.transcript) }.disabled(meeting.transcript.isEmpty)
-                        Button("Copy summary") { copy(meeting.summary) }.disabled(meeting.summary.isEmpty)
-                    }
-                    ScrollView { ChatQAView(text: meeting.questions).frame(maxWidth: .infinity, alignment: .leading) }
+    /// Single pinned toolbar with note navigation and all meeting actions.
+    private var meetingToolbar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Picker("Note section", selection: Binding(
+                    get: { noteTab },
+                    set: { value in withAnimation(.easeInOut(duration: 0.2)) { noteTab = value } }
+                )) {
+                    Text("Summary").tag("Summary")
+                    Text("Transcript").tag("Transcript")
+                    Text("Full note").tag("Full note")
+                    Text("Chat").tag("Chat")
+                    Text("Events").tag("Events")
                 }
-                .padding()
-                .frame(width: 620, height: 520)
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 420)
+
+                Button { withAnimation(.easeInOut(duration: 0.2)) { noteTab = "Chat" } } label: {
+                    Label("Ask", systemImage: "bubble.left.and.bubble.right")
+                }
+
+                Menu("Copy") {
+                    Button("Entire summary") { copy(meeting.summary) }.disabled(meeting.summary.isEmpty)
+                    Button("Transcript") { copy(meeting.transcript) }.disabled(meeting.transcript.isEmpty)
+                    Button("Chat") { copy(meeting.questions) }.disabled(meeting.questions.isEmpty)
+                    Button("Full note") { copyFullNote() }
+                }
+
+                Button {
+                    if !meeting.company.isEmpty { brainClient = meeting.company }
+                    showBrainPrompt = true
+                } label: {
+                    Label("Second Brain", systemImage: "brain.head.profile")
+                }
+                .disabled(link.brainTransferIds.contains(meeting.id))
+
+                Menu {
+                    Button { link.retranscribeMeeting(meeting) } label: {
+                        Label("Re-transcribe", systemImage: "waveform")
+                    }
+                    .disabled(link.regeneratingSummaryIds.contains(meeting.id))
+                    Button { link.shareMeeting(meeting) } label: {
+                        Label("Share", systemImage: "square.and.arrow.up")
+                    }
+                    Divider()
+                    Button(role: .destructive) { link.deleteMeeting(meeting) } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                } label: {
+                    Label("Tools", systemImage: "ellipsis.circle")
+                }
             }
-            Text(meeting.questions.isEmpty ? "No chat yet" : "Chat history available")
-                .font(.caption).foregroundStyle(.secondary)
-            Spacer()
-            Button("Copy transcript") { copy(meeting.transcript) }.disabled(meeting.transcript.isEmpty)
-            Button("Copy summary") { copy(meeting.summary) }.disabled(meeting.summary.isEmpty)
+
+            if noteTab == "Summary" || link.brainTransferIds.contains(meeting.id) || link.regeneratingSummaryIds.contains(meeting.id) {
+                HStack(spacing: 12) {
+                    if noteTab == "Summary" {
+                        Picker("Summary language", selection: Binding(get: { summaryLanguage }, set: { summaryLanguage = $0; link.regenerateMeetingSummary(meeting) })) {
+                            Text("Original").tag("Original")
+                            Text("Hebrew").tag("Hebrew")
+                            Text("English").tag("English")
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .frame(width: 230)
+                        Picker("Summary type", selection: Binding(get: { summaryType }, set: { summaryType = $0; link.regenerateMeetingSummary(meeting) })) {
+                            Text("Detailed").tag("Detailed")
+                            Text("Short").tag("Short")
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .frame(width: 150)
+                    }
+                    if link.brainTransferIds.contains(meeting.id) {
+                        ProgressView().controlSize(.small)
+                        Text("Sending to Second Brain…").font(.caption).foregroundStyle(.secondary)
+                    } else if link.regeneratingSummaryIds.contains(meeting.id) {
+                        ProgressView().controlSize(.small)
+                        Text("Working on meeting…").font(.caption).foregroundStyle(.secondary)
+                    } else if noteTab == "Summary", let updated = meeting.notesUpdatedAt {
+                        Text("Updated \(updated.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
         }
-        .padding(10)
-        .background(.regularMaterial, in: Capsule())
     }
 
     private func markdownPreviewText(_ text: String) -> String {
@@ -984,6 +1102,151 @@ struct EventLogView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct TranscriptTextView: View {
+    private let chunks: [String]
+
+    init(text: String) {
+        var chunks: [String] = []
+        var lines: [String] = []
+        var characterCount = 0
+
+        for line in text.components(separatedBy: .newlines) {
+            let lineCharacterCount = line.count + (lines.isEmpty ? 0 : 1)
+            if !lines.isEmpty && (lines.count == 80 || characterCount + lineCharacterCount > 12_000) {
+                chunks.append(lines.joined(separator: "\n"))
+                lines = []
+                characterCount = 0
+            }
+            lines.append(line)
+            characterCount += line.count + (lines.count == 1 ? 0 : 1)
+        }
+        if !lines.isEmpty { chunks.append(lines.joined(separator: "\n")) }
+        self.chunks = chunks
+    }
+
+    var body: some View {
+        LazyVStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(chunks.enumerated()), id: \.offset) { _, chunk in
+                Text(chunk)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct MeetingChatView: View {
+    let archive: MeetingChatArchive
+    @Binding var draft: String
+    let isSending: Bool
+    let error: String?
+    let onSend: () -> Void
+    let onNewSession: () -> Void
+    let onSelectSession: (String) -> Void
+
+    private var messages: [MeetingChatMessage] { archive.activeSession?.messages ?? [] }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                if !archive.sessions.isEmpty {
+                    Menu(activeSessionLabel) {
+                        ForEach(Array(archive.sessions.enumerated()), id: \.element.id) { index, session in
+                            Button(sessionLabel(session, index: index)) { onSelectSession(session.id) }
+                        }
+                    }
+                    .disabled(isSending)
+                }
+                Spacer()
+                Button(action: onNewSession) {
+                    Label("New Session", systemImage: "plus.bubble")
+                }
+                .disabled(isSending)
+            }
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        if messages.isEmpty {
+                            Text("Ask about this meeting. Answers use only this meeting note.")
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                                .padding()
+                        } else {
+                            ForEach(messages) { message in
+                                MeetingChatBubble(message: message)
+                            }
+                        }
+                        Color.clear.frame(height: 1).id("meeting-chat-bottom")
+                    }
+                    .padding(.vertical, 4)
+                }
+                .frame(height: 380)
+                .onAppear { scrollToBottom(proxy) }
+                .onChange(of: messages.count) { _ in scrollToBottom(proxy) }
+            }
+
+            if isSending {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Thinking about this note…").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if let error {
+                Text(error).font(.caption).foregroundStyle(.red)
+            }
+            HStack(alignment: .bottom, spacing: 8) {
+                TextField("Ask a question about this meeting", text: $draft, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...5)
+                Button("Send", action: onSend)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(isSending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+    }
+
+    private var activeSessionLabel: String {
+        guard let session = archive.activeSession,
+              let index = archive.sessions.firstIndex(where: { $0.id == session.id }) else { return "Chat" }
+        return sessionLabel(session, index: index)
+    }
+
+    private func sessionLabel(_ session: MeetingChatSession, index: Int) -> String {
+        "Chat \(index + 1) · \(session.createdAt.formatted(date: .abbreviated, time: .shortened))"
+    }
+
+    private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        DispatchQueue.main.async { withAnimation { proxy.scrollTo("meeting-chat-bottom", anchor: .bottom) } }
+    }
+}
+
+struct MeetingChatBubble: View {
+    let message: MeetingChatMessage
+
+    var body: some View {
+        HStack {
+            if message.role == .user { Spacer(minLength: 60) }
+            Group {
+                if message.role == .assistant {
+                    FormattedNoteText(text: message.content)
+                } else {
+                    Text(message.content).textSelection(.enabled)
+                }
+            }
+            .padding(10)
+            .foregroundStyle(message.role == .user ? .white : .primary)
+            .background(message.role == .user ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.regularMaterial), in: RoundedRectangle(cornerRadius: 14))
+            .frame(maxWidth: 560, alignment: message.role == .user ? .trailing : .leading)
+            if message.role == .assistant { Spacer(minLength: 60) }
+        }
+        .frame(maxWidth: .infinity, alignment: message.role == .user ? .trailing : .leading)
     }
 }
 

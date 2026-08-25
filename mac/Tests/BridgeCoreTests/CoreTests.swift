@@ -304,6 +304,143 @@ final class MeetingCaptureTests: XCTestCase {
         XCTAssertEqual(exporter.canonicalClientName("acme-CORP"), "Acme Corp")
         XCTAssertEqual(exporter.canonicalClientName("New Client"), "New Client")
     }
+
+    func testMergesMeetingsUsingChosenTitleAndDate() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        try writeMergeSource(root, name: "2026-01-05 09-00 - Kickoff", text: "first")
+        try writeMergeSource(root, name: "2026-02-11 14-30 - Follow Up", text: "second")
+        let records = store.listMeetings()
+        XCTAssertEqual(records.count, 2)
+
+        let chosen = Date(timeIntervalSince1970: 1_767_600_000)
+        var steps: [String] = []
+        let merged = try XCTUnwrap(store.mergeMeetings(
+            records,
+            options: MeetingMergeOptions(title: "Chosen Title", date: chosen),
+            progress: { steps.append($0) }
+        ))
+
+        XCTAssertTrue(merged.lastPathComponent.hasSuffix(" - Chosen-Title"), merged.lastPathComponent)
+        XCTAssertFalse(steps.isEmpty)
+        let mergedRecord = try XCTUnwrap(store.listMeetings().first { $0.url.lastPathComponent == merged.lastPathComponent })
+        XCTAssertEqual(mergedRecord.title, "Chosen Title")
+        XCTAssertEqual(mergedRecord.date.timeIntervalSince1970, chosen.timeIntervalSince1970, accuracy: 1)
+        XCTAssertTrue(mergedRecord.transcript.contains("first"))
+        XCTAssertTrue(mergedRecord.transcript.contains("second"))
+        XCTAssertEqual(mergedRecord.audioCount, 2)
+    }
+
+    func testMeetingMergeRejectsEmptyTitleAndSingleMeeting() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        try writeMergeSource(root, name: "2026-01-05 09-00 - Kickoff", text: "first")
+        try writeMergeSource(root, name: "2026-02-11 14-30 - Follow Up", text: "second")
+        let records = store.listMeetings()
+
+        XCTAssertNil(store.mergeMeetings(records, options: MeetingMergeOptions(title: "   ", date: Date())))
+        XCTAssertNil(store.mergeMeetings(Array(records.prefix(1)), options: MeetingMergeOptions(title: "Solo", date: Date())))
+    }
+
+    func testMeetingChatPersistsSessionsAndUsesOnlyActiveConversationContext() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        store.appendTranscript(meetingId: "meeting", segment: TranscriptSegment(speaker: "A", startMs: 0, endMs: 1, text: "Transcript evidence"))
+        try "## Summary\n\nSummary evidence\n\n## Transcript\n\n".write(to: store.meetingDir("meeting").appendingPathComponent("notes.md"), atomically: true, encoding: .utf8)
+        let meeting = try XCTUnwrap(store.listMeetings().first)
+        var userWasStored = false
+
+        _ = try store.answerQuestion(meeting, question: "First question", onUserStored: { pending in
+            let messages = pending.activeSession?.messages ?? []
+            userWasStored = messages.count == 1 && messages[0].role == .user && messages[0].content == "First question"
+        }, responder: { _, _, conversation in
+            XCTAssertTrue(conversation.isEmpty)
+            return "First answer"
+        })
+        XCTAssertTrue(userWasStored)
+
+        _ = try store.answerQuestion(meeting, question: "Follow up", responder: { _, note, conversation in
+            XCTAssertTrue(note.contains("Summary:\nSummary evidence"))
+            XCTAssertTrue(note.contains("Transcript:\nA: Transcript evidence"))
+            XCTAssertTrue(conversation.contains("You: First question"))
+            XCTAssertTrue(conversation.contains("Assistant: First answer"))
+            return "Second answer"
+        })
+        let secondSession = try store.startChatSession(meeting)
+        XCTAssertEqual(secondSession.sessions.count, 2)
+        _ = try store.answerQuestion(meeting, question: "Clean question", responder: { _, _, conversation in
+            XCTAssertTrue(conversation.isEmpty)
+            return "Clean answer"
+        })
+
+        let archive = try MeetingStore(root: root).chatArchive(for: meeting)
+        XCTAssertEqual(archive.sessions.count, 2)
+        XCTAssertEqual(archive.activeSession?.messages.map(\.content), ["Clean question", "Clean answer"])
+        XCTAssertEqual(archive.sessions[0].messages.map(\.content), ["First question", "First answer", "Follow up", "Second answer"])
+        XCTAssertEqual(archive.sessions[0].messages.map(\.role), [.user, .assistant, .user, .assistant])
+        let markdown = try String(contentsOf: meeting.url.appendingPathComponent("questions.md"), encoding: .utf8)
+        XCTAssertTrue(markdown.contains("## Chat Session 1"))
+        XCTAssertTrue(markdown.contains("### You\n\nFirst question"))
+        XCTAssertTrue(markdown.contains("### Assistant\n\nClean answer"))
+    }
+
+    func testMeetingChatKeepsUserMessageWhenAIAnswerFails() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        store.appendTranscript(meetingId: "meeting", segment: TranscriptSegment(speaker: "A", startMs: 0, endMs: 1, text: "Transcript"))
+        let meeting = try XCTUnwrap(store.listMeetings().first)
+
+        XCTAssertThrowsError(try store.answerQuestion(meeting, question: "Submitted question", responder: { _, _, _ in nil })) {
+            XCTAssertEqual($0 as? MeetingChatError, .aiUnavailable)
+        }
+
+        let archive = try MeetingStore(root: root).chatArchive(for: meeting)
+        XCTAssertEqual(archive.activeSession?.messages.map(\.role), [.user])
+        XCTAssertEqual(archive.activeSession?.messages.map(\.content), ["Submitted question"])
+    }
+
+    func testMeetingChatRejectsUnreadableLegacyArchive() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        store.appendTranscript(meetingId: "meeting", segment: TranscriptSegment(speaker: "A", startMs: 0, endMs: 1, text: "Transcript"))
+        let meeting = try XCTUnwrap(store.listMeetings().first)
+        try FileManager.default.createDirectory(
+            at: meeting.url.appendingPathComponent("questions.md", isDirectory: true),
+            withIntermediateDirectories: false
+        )
+
+        XCTAssertThrowsError(try store.chatArchive(for: meeting)) {
+            XCTAssertEqual($0 as? MeetingChatError, .invalidArchive)
+        }
+    }
+
+    func testMeetingChatImportsLegacyQuestionsWithoutLosingHistory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        store.appendTranscript(meetingId: "meeting", segment: TranscriptSegment(speaker: "A", startMs: 0, endMs: 1, text: "Transcript"))
+        let meeting = try XCTUnwrap(store.listMeetings().first)
+        let legacy = "## Q: What happened?\n\nThe launch was approved.\n\n## Q: Who owns it?\n\nJordan owns it.\n"
+        try legacy.write(to: meeting.url.appendingPathComponent("questions.md"), atomically: true, encoding: .utf8)
+
+        let imported = try store.chatArchive(for: meeting)
+        XCTAssertEqual(imported.sessions.count, 1)
+        XCTAssertEqual(imported.activeSession?.messages.map(\.role), [.user, .assistant, .user, .assistant])
+        XCTAssertEqual(imported.activeSession?.messages.map(\.content), ["What happened?", "The launch was approved.", "Who owns it?", "Jordan owns it."])
+
+        _ = try store.startChatSession(meeting)
+        let reloaded = try MeetingStore(root: root).chatArchive(for: meeting)
+        XCTAssertEqual(reloaded.sessions.count, 2)
+        XCTAssertEqual(reloaded.sessions[0].messages, imported.sessions[0].messages)
+        let markdown = try String(contentsOf: meeting.url.appendingPathComponent("questions.md"), encoding: .utf8)
+        XCTAssertTrue(markdown.contains("What happened?"))
+        XCTAssertTrue(markdown.contains("Jordan owns it."))
+    }
 }
 
 private func writeSilentWav(_ url: URL) throws {
@@ -639,4 +776,13 @@ final class StreamPropertyTests: XCTestCase {
             return reasm.complete && reasm.result() == blob.data
         }
     }
+}
+
+private func writeMergeSource(_ root: URL, name: String, text: String) throws {
+    let dir = root.appendingPathComponent(name, isDirectory: true)
+    try FileManager.default.createDirectory(at: dir.appendingPathComponent("media", isDirectory: true), withIntermediateDirectories: true)
+    let segment = TranscriptSegment(speaker: "A", startMs: 0, endMs: 100, text: text)
+    let line = String(decoding: try JSONEncoder().encode(segment), as: UTF8.self) + "\n"
+    try line.write(to: dir.appendingPathComponent("transcript.jsonl"), atomically: true, encoding: .utf8)
+    try writeSilentWav(dir.appendingPathComponent("media/chunk.wav"))
 }

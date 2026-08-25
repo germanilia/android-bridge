@@ -47,7 +47,11 @@ public final class LinkManager: ObservableObject {
     private var warnedScreenCapture = false
     @Published public private(set) var receivedFiles: [ReceivedFile] = []
     @Published public private(set) var meetings: [MeetingRecord] = []
+    @Published public private(set) var meetingChats: [String: MeetingChatArchive] = [:]
+    @Published public private(set) var meetingChatBusyIds: Set<String> = []
+    @Published public private(set) var meetingChatErrors: [String: String] = [:]
     @Published public private(set) var regeneratingSummaryIds: Set<String> = []
+    @Published public private(set) var mergeStatus: String?
     @Published public private(set) var summaryBackfillStatus: String?
     @Published public private(set) var summaryBackfillRunning = false
     @Published public private(set) var brainTransferIds: Set<String> = []
@@ -98,6 +102,7 @@ public final class LinkManager: ObservableObject {
     private let macRecorder = MacMeetingRecorder.shared
     private let meetingProcessingQueue = DispatchQueue(label: "com.androidbridge.meeting.processing")
     private let meetingFinalizationQueue = DispatchQueue(label: "com.androidbridge.meeting.finalization")
+    private let meetingChatQueue = DispatchQueue(label: "com.androidbridge.meeting-chat", qos: .userInitiated)
     private let meetingContentMirrorQueue = DispatchQueue(label: "com.androidbridge.meeting-content-mirror", qos: .utility)
     private let brainRefreshQueue = DispatchQueue(label: "com.androidbridge.second-brain.refresh")
     private var meetingContentMirrorGeneration = 0
@@ -1613,23 +1618,96 @@ public final class LinkManager: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
-    public func askMeetingQuestion(_ meeting: MeetingRecord, question: String) {
-        let clean = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return }
-        DispatchQueue.global(qos: .userInitiated).async {
-            _ = self.meetingStore.answerQuestion(meeting, question: clean)
-            self.refreshMeetings()
+    public func loadMeetingChat(_ meeting: MeetingRecord) {
+        meetingChatQueue.async {
+            do {
+                self.publishMeetingChat(try self.meetingStore.chatArchive(for: meeting), for: meeting.id)
+            } catch {
+                self.publishMeetingChatError(error, for: meeting.id)
+            }
         }
     }
 
-    public func mergeMeetings(_ meetings: [MeetingRecord]) {
+    public func startMeetingChatSession(_ meeting: MeetingRecord) {
+        guard !meetingChatBusyIds.contains(meeting.id) else { return }
+        meetingChatQueue.async {
+            do {
+                self.publishMeetingChat(try self.meetingStore.startChatSession(meeting), for: meeting.id)
+                self.refreshMeetings()
+            } catch {
+                self.publishMeetingChatError(error, for: meeting.id)
+            }
+        }
+    }
+
+    public func selectMeetingChatSession(_ meeting: MeetingRecord, sessionId: String) {
+        guard !meetingChatBusyIds.contains(meeting.id) else { return }
+        meetingChatQueue.async {
+            do {
+                self.publishMeetingChat(try self.meetingStore.selectChatSession(meeting, sessionId: sessionId), for: meeting.id)
+            } catch {
+                self.publishMeetingChatError(error, for: meeting.id)
+            }
+        }
+    }
+
+    public func askMeetingQuestion(_ meeting: MeetingRecord, question: String) {
+        let clean = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, !meetingChatBusyIds.contains(meeting.id) else { return }
+        meetingChatBusyIds.insert(meeting.id)
+        meetingChatErrors.removeValue(forKey: meeting.id)
+        meetingChatQueue.async {
+            do {
+                let archive = try self.meetingStore.answerQuestion(meeting, question: clean, onUserStored: {
+                    self.publishMeetingChat($0, for: meeting.id)
+                })
+                self.publishMeetingChat(archive, for: meeting.id)
+                self.refreshMeetings()
+            } catch {
+                self.publishStoredMeetingChat(meeting, after: error)
+                self.refreshMeetings()
+            }
+            DispatchQueue.main.async { self.meetingChatBusyIds.remove(meeting.id) }
+        }
+    }
+
+    private func publishMeetingChat(_ archive: MeetingChatArchive, for meetingId: String) {
+        DispatchQueue.main.async {
+            self.meetingChats[meetingId] = archive
+            self.meetingChatErrors.removeValue(forKey: meetingId)
+        }
+    }
+
+    private func publishStoredMeetingChat(_ meeting: MeetingRecord, after error: Error) {
+        do {
+            let archive = try meetingStore.chatArchive(for: meeting)
+            DispatchQueue.main.async { self.meetingChats[meeting.id] = archive }
+        } catch {
+            publishMeetingChatError(error, for: meeting.id)
+            return
+        }
+        publishMeetingChatError(error, for: meeting.id)
+    }
+
+    private func publishMeetingChatError(_ error: Error, for meetingId: String) {
+        DispatchQueue.main.async { self.meetingChatErrors[meetingId] = error.localizedDescription }
+    }
+
+    public func mergeMeetings(_ meetings: [MeetingRecord], options: MeetingMergeOptions) {
+        guard mergeStatus == nil else { return }
+        mergeStatus = "Preparing merge…"
         DispatchQueue.global(qos: .userInitiated).async {
-            guard let dir = self.meetingStore.mergeMeetings(meetings), self.meetingStore.hasReadableMeeting(at: dir) else {
+            let merged = self.meetingStore.mergeMeetings(meetings, options: options) { step in
+                DispatchQueue.main.async { self.mergeStatus = step }
+            }
+            guard let dir = merged, self.meetingStore.hasReadableMeeting(at: dir) else {
+                DispatchQueue.main.async { self.mergeStatus = nil }
                 self.pushEvent("🔀 Merge failed")
                 return
             }
             for meeting in meetings where !meeting.isActive { self.meetingStore.trashMeeting(meeting) }
             self.refreshMeetings()
+            DispatchQueue.main.async { self.mergeStatus = nil }
             self.pushEvent("🔀 Merged \(meetings.count) meetings into \(dir.lastPathComponent)")
         }
     }
