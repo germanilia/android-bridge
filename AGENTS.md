@@ -97,6 +97,20 @@ It now logs and skips only the offending frame:
 **Do not reintroduce a close here.** Dropping the link cannot discard a bad frame;
 it only guarantees the frame comes back.
 
+`RelayWebSocketTransport.onMessage(bytes)` had the same shape and was the close
+that actually kept the link down: a full inbound channel produced
+`close(1009, "receiver busy")`. The peer replays its whole journal on reconnect
+(up to ~279 frames observed in one batch) which outran the 64-slot channel almost
+immediately. It now blocks the OkHttp reader thread for up to 5s so TCP
+backpressure reaches the relay, and drops the frame only if the consumer is still
+behind. Capacity is 256. The 5s wait is deliberately under OkHttp's 10s
+`pingInterval` so a slow consumer cannot trip the ping timeout instead.
+
+**Diagnosing closes:** `RelayEvent.Closed` now carries the WebSocket `code` and
+`reason`, logged as `relay_closed code=<n>,reason=<text>`; `RelayEvent.Failure`
+logs as `relay_failed error=<class>`. Both were previously discarded, which is
+why the first two fixes looked like they had done nothing.
+
 Two things still to know when reading these logs:
 
 1. Exception *messages* are deliberately not logged. `LinkLogger` forbids the key

@@ -349,6 +349,37 @@ class RelayWebSocketTransportTest : StringSpec({
         }
     }
 
+    "transport applies backpressure instead of closing when the receiver is behind" {
+        val observedCloseCode = AtomicInteger(0)
+        val server = MockWebServer()
+        server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
+                repeat(6) { webSocket.send(ByteString.of(it.toByte())) }
+            }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                observedCloseCode.set(code)
+            }
+        }))
+        server.start()
+        try {
+            val transport = RelayWebSocketTransport(inboundCapacity = 1)
+            transport.connectAt(server.url("/v1/connect"), RelayCredentials("android-1", "credential-1"), generation = 11)
+            runBlocking {
+                withTimeout(3_000) {
+                    while (transport.events.receive() !is RelayEvent.Open) Unit
+                }
+                val received = (0 until 6).map {
+                    withTimeout(5_000) { transport.inbound.receive() }.bytes.single()
+                }
+                received shouldBe listOf<Byte>(0, 1, 2, 3, 4, 5)
+            }
+            observedCloseCode.get() shouldBe 0
+        } finally {
+            server.shutdown()
+        }
+    }
+
     "transport rejects oversized outbound frame" {
         val transport = RelayWebSocketTransport()
         runCatching { transport.send(ByteArray(MAX_RELAY_FRAME_BYTES + 1)) }.isFailure shouldBe true

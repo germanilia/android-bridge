@@ -483,8 +483,17 @@ class LinkManager(
             when (event) {
                 is RelayEvent.Open -> adoptRelay(event.generation)
                 is RelayEvent.Waiting -> _relayStatus.value = RelayUiStatus(RelayConnectionState.PAUSED, "Relay connected; waiting for Mac")
-                is RelayEvent.Closed -> relayDisconnected(event.generation)
-                is RelayEvent.Failure -> relayDisconnected(event.generation)
+                is RelayEvent.Closed -> {
+                    LinkLogger.warn(
+                        "relay_closed",
+                        mapOf("code" to event.code.toString(), "reason" to event.reason),
+                    )
+                    relayDisconnected(event.generation)
+                }
+                is RelayEvent.Failure -> {
+                    LinkLogger.warn("relay_failed", mapOf("error" to event.errorType))
+                    relayDisconnected(event.generation)
+                }
             }
         }
     }

@@ -5,6 +5,8 @@ import com.androidbridge.protocol.Message
 import com.androidbridge.protocol.MessageCodec
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -19,7 +21,7 @@ sealed interface RelayEvent {
     val generation: Long
     data class Open(override val generation: Long) : RelayEvent
     data class Waiting(override val generation: Long) : RelayEvent
-    data class Closed(override val generation: Long) : RelayEvent
+    data class Closed(override val generation: Long, val code: Int = 0, val reason: String = "") : RelayEvent
     data class Failure(override val generation: Long, val errorType: String) : RelayEvent
 }
 
@@ -28,7 +30,7 @@ data class RelayInboundFrame(val generation: Long, val bytes: ByteArray)
 /** WSS is a byte transport. Relay envelope/delta models plug in through [RelayMessageAdapter]. */
 class RelayWebSocketTransport(
     private val client: OkHttpClient = OkHttpClient.Builder().pingInterval(10, TimeUnit.SECONDS).build(),
-    inboundCapacity: Int = 64,
+    inboundCapacity: Int = INBOUND_CAPACITY,
 ) {
     private val eventChannel = Channel<RelayEvent>(Channel.BUFFERED)
     private val inboundChannel = Channel<RelayInboundFrame>(inboundCapacity)
@@ -70,8 +72,17 @@ class RelayWebSocketTransport(
                 webSocket.close(1009, "frame too large")
                 return
             }
-            if (inboundChannel.trySend(RelayInboundFrame(generation, bytes.toByteArray())).isFailure) {
-                webSocket.close(1009, "receiver busy")
+            val frame = RelayInboundFrame(generation, bytes.toByteArray())
+            if (inboundChannel.trySend(frame).isFailure) {
+                // The peer replays its whole journal on reconnect, which briefly outruns the
+                // receive loop. Block this reader thread so TCP backpressure reaches the relay
+                // rather than killing the link; the wait stays under the ping interval so OkHttp
+                // does not time the socket out. If the consumer is still behind, drop this frame:
+                // the peer replays unacknowledged operations on the next resume, whereas closing
+                // the socket strands the entire batch and guarantees another flap.
+                runBlocking {
+                    withTimeoutOrNull(INBOUND_BACKPRESSURE_TIMEOUT_MS) { inboundChannel.send(frame) }
+                }
             }
         }
 
@@ -86,7 +97,7 @@ class RelayWebSocketTransport(
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            eventChannel.trySend(RelayEvent.Closed(generation))
+            eventChannel.trySend(RelayEvent.Closed(generation, code, reason))
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -97,6 +108,8 @@ class RelayWebSocketTransport(
     companion object {
         const val MAX_RELAY_FRAME_BYTES = MAX_CONTROL_BYTES.toInt() + 4
         private const val RELAY_ERROR_PEER_ABSENT = "peer_absent"
+        private const val INBOUND_CAPACITY = 256
+        private const val INBOUND_BACKPRESSURE_TIMEOUT_MS = 5_000L
         private val RELAY_ERROR_CODE = Regex("\"error\"\\s*:\\s*\"([a-z_]+)\"")
     }
 }
