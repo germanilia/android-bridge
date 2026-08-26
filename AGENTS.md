@@ -148,6 +148,34 @@ It now extracts the code with a regex and never closes over it. `peer_absent` st
 raises `RelayEvent.Waiting`; other codes are ignored client-side because the relay
 records them server-side as `frame_undelivered`.
 
+## Deploy trap: pushing does not necessarily update the phone
+
+The pre-push hook runs `scripts/update-local-apps.sh`, which rebuilds the Mac
+app, then the Android app, then deploys the relay. Only the **relay** step can
+fail the push. `update_android()` **silently skips** when `adb devices` lists no
+authorized device, printing e.g.
+`Skipping Android update: select exactly one authorized device or set ANDROID_SERIAL.`
+That line scrolls past in a long build log, and the push still succeeds.
+
+So a green push does **not** mean the phone is running your change. Verify:
+
+```sh
+ls -l android/app/build/outputs/apk/debug/app-debug.apk   # build time
+adb shell dumpsys package com.androidbridge | grep lastUpdateTime
+```
+
+If the phone is off adb, install it yourself once reconnected:
+
+```sh
+cd android && ./gradlew :app:assembleDebug --no-daemon
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n com.androidbridge/.MainActivity
+```
+
+Also: a long-running `adb logcat -d` on a large buffer can hang and leave the
+device unlisted. `adb kill-server && adb start-server` recovers it, but the phone
+may need re-authorizing on-screen.
+
 ## Build and test gotchas
 
 - Gradle's `--tests` filter needs the **fully-qualified** class name for these
