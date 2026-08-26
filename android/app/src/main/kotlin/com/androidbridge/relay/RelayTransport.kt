@@ -75,11 +75,13 @@ class RelayWebSocketTransport(
             }
         }
 
+        // The relay reports transport-level conditions as a JSON text frame. Parse the code instead
+        // of matching one exact string, and never close the socket over it: `peer_backpressure` is
+        // transient, and the relay already records every undeliverable frame server-side.
         override fun onMessage(webSocket: WebSocket, text: String) {
-            if (text == "{\"error\":\"peer_absent\"}") {
-                eventChannel.trySend(RelayEvent.Waiting(generation))
-            } else {
-                webSocket.close(1003, "unexpected text frame")
+            when (RELAY_ERROR_CODE.find(text)?.groupValues?.get(1)) {
+                RELAY_ERROR_PEER_ABSENT -> eventChannel.trySend(RelayEvent.Waiting(generation))
+                else -> Unit
             }
         }
 
@@ -94,6 +96,8 @@ class RelayWebSocketTransport(
 
     companion object {
         const val MAX_RELAY_FRAME_BYTES = MAX_CONTROL_BYTES.toInt() + 4
+        private const val RELAY_ERROR_PEER_ABSENT = "peer_absent"
+        private val RELAY_ERROR_CODE = Regex("\"error\"\\s*:\\s*\"([a-z_]+)\"")
     }
 }
 

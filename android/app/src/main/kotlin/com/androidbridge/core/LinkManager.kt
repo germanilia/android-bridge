@@ -522,20 +522,24 @@ class LinkManager(
         for (frame in relayTransport.inbound) {
             if (frame.generation != relaySessionGate.currentGeneration() || relaySessionGate.route != RelayRoute.RELAY) continue
             _relayStatus.value = RelayUiStatus(RelayConnectionState.RELAY_CONNECTED)
+            // A frame the peer sent is not a reason to tear down the link: dropping the connection
+            // strands the frame in the peer journal, so it is replayed on every reconnect and the
+            // link flaps forever. Log the rejection and skip only the offending frame.
             val message = try {
                 relayMessageAdapter.decode(frame.bytes)
-            } catch (_: Exception) {
-                LinkLogger.securityEvent("relay_frame_reject")
-                relayTransport.close()
+            } catch (error: Exception) {
+                LinkLogger.securityEvent("relay_frame_reject", mapOf("error" to error::class.java.simpleName))
                 continue
             }
             val result = try {
                 synchronized(relayReplayLock) {
                     relayReplaySession.handle(message).also { queueRelayFrames(it.outboundFrames) }
                 }
-            } catch (_: Exception) {
-                LinkLogger.securityEvent("relay_sync_reject")
-                relayTransport.close()
+            } catch (error: Exception) {
+                LinkLogger.securityEvent(
+                    "relay_sync_reject",
+                    mapOf("error" to error::class.java.simpleName, "type" to message.type),
+                )
                 continue
             }
             result.messages.forEach(router::route)

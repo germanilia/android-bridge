@@ -185,8 +185,14 @@ private suspend fun io.ktor.server.websocket.DefaultWebSocketServerSession.route
         }
         when (registry.forward(deviceId, payload)) {
             ForwardResult.FORWARDED -> auditor.record("frame_forwarded", "forwarded", deviceId, payload.size)
-            ForwardResult.PEER_ABSENT -> sendError(json, "peer_absent")
-            ForwardResult.BACKPRESSURE -> sendError(json, "peer_backpressure")
+            ForwardResult.PEER_ABSENT -> {
+                auditor.record("frame_undelivered", "peer_absent", deviceId, payload.size)
+                sendError(json, "peer_absent")
+            }
+            ForwardResult.BACKPRESSURE -> {
+                auditor.record("frame_undelivered", "peer_backpressure", deviceId, payload.size)
+                sendError(json, "peer_backpressure")
+            }
         }
     }
 }

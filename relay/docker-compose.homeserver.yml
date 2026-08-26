@@ -9,6 +9,7 @@ services:
       RELAY_SETUP_CODE: ${RELAY_SETUP_CODE:?RELAY_SETUP_CODE must be set in .env}
     volumes:
       - relay_config:/config
+      - relay_logs:/logs
     read_only: true
     tmpfs:
       - /tmp:size=16m,noexec,nosuid,nodev
@@ -17,6 +18,14 @@ services:
     security_opt:
       - no-new-privileges:true
     pids_limit: 128
+    # Durable relay logs live in /logs and are rotated daily with 4-day retention by
+    # logback (relay/src/main/resources/logback.xml). The docker json-file driver has no
+    # time-based rotation, so `docker logs` is bounded by size only.
+    logging:
+      driver: json-file
+      options:
+        max-size: "32m"
+        max-file: "4"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
       interval: 30s
@@ -33,3 +42,5 @@ networks:
 volumes:
   relay_config:
     name: android_bridge_relay_config
+  relay_logs:
+    name: android_bridge_relay_logs

@@ -1,6 +1,7 @@
 package com.androidbridge.relay
 
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.matchers.collections.shouldContain as shouldContainElement
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
 import io.ktor.client.plugins.websocket.WebSockets
@@ -45,6 +46,25 @@ class WebSocketIntegrationTest : FunSpec({
             mac.send(Frame.Binary(true, byteArrayOf(9, 8, 7)))
             (mac.incoming.receive() as Frame.Text).readText() shouldContain "peer_absent"
             mac.close()
+        }
+    }
+
+    test("undeliverable frames are audited with their reason") {
+        testApplication {
+            val relay = installTestRelay()
+            val macCredential = enrollMac(jsonClient()).credential
+            val wsClient = createClient { install(WebSockets) }
+            val mac = wsClient.authenticatedSession("mac-1", macCredential)
+
+            mac.send(Frame.Binary(true, byteArrayOf(9, 8, 7)))
+            (mac.incoming.receive() as Frame.Text).readText() shouldContain "peer_absent"
+            mac.close()
+
+            relay.auditSink.events.map { it.event } shouldContainElement "frame_undelivered"
+            val undelivered = relay.auditSink.events.first { it.event == "frame_undelivered" }
+            undelivered.result shouldBe "peer_absent"
+            undelivered.deviceId shouldBe "mac-1"
+            undelivered.byteCount shouldBe 3
         }
     }
 

@@ -58,6 +58,26 @@ Credentials are unique per device. Android stores its credential in Keystore-bac
 - Second Brain Markdown and meeting JPEG/PNG projections coexist with Syncthing through content hashes and echo suppression.
 - Mac-local meeting audio never syncs to the phone. Phone-origin meeting chunks may transit the relay to their configured Mac storage.
 
+## Logs and retention
+
+The relay logs to the container console (`docker logs android-bridge-relay`) and to a
+durable file in the `/logs` volume (`android_bridge_relay_logs`). File logs roll daily
+and are retained for **4 days**, capped at 512MB total, configured in
+`relay/src/main/resources/logback.xml`. Set `RELAY_LOG_DIR` to relocate them.
+
+The Docker `json-file` driver has no time-based rotation, so `docker logs` output is
+bounded by size instead (`max-size: 32m`, `max-file: 4`).
+
+Every frame the relay cannot deliver is recorded as `event=frame_undelivered` with
+`result=peer_absent` or `result=peer_backpressure`. Payload contents are never logged.
+
+## Malformed frames do not drop the link
+
+A frame that fails to decode or that the peer's sync engine rejects is logged and
+skipped; the connection stays open. Tearing the link down instead would strand the
+frame in the sender's journal, so it would be replayed on every reconnect and the link
+would flap indefinitely.
+
 ## Reset and revocation
 
 Removing the relay credential in either app disables relay on that device. The relay API supports authenticated peer revocation. Deleting the Docker named volume `android_bridge_relay_config` resets every enrollment and should only be used intentionally.

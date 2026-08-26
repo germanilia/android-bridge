@@ -35,6 +35,7 @@ import io.kotest.property.arbitrary.int
 import io.kotest.property.checkAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.HttpUrl
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -42,6 +43,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okio.ByteString
 import java.nio.file.Files
+import java.util.concurrent.atomic.AtomicInteger
 
 class RelaySettingsTest : StringSpec({
     "relay endpoint requires secure WebSocket and no embedded secrets" {
@@ -311,6 +313,37 @@ class RelayWebSocketTransportTest : StringSpec({
                     while (transport.events.receive() !is RelayEvent.Waiting) Unit
                 }
             }
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    "transport keeps the socket open when relay reports a transient error" {
+        val observedCloseCode = AtomicInteger(0)
+        val server = MockWebServer()
+        server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
+                webSocket.send("{\"error\":\"peer_backpressure\"}")
+                webSocket.send(ByteString.of(4, 5, 6))
+            }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                observedCloseCode.set(code)
+            }
+        }))
+        server.start()
+        try {
+            val transport = RelayWebSocketTransport()
+            transport.connectAt(server.url("/v1/connect"), RelayCredentials("android-1", "credential-1"), generation = 9)
+            runBlocking {
+                withTimeout(3_000) {
+                    while (transport.events.receive() !is RelayEvent.Open) Unit
+                }
+                val inbound = withTimeout(3_000) { transport.inbound.receive() }
+                inbound.bytes.toList() shouldBe listOf<Byte>(4, 5, 6)
+                withTimeoutOrNull(500) { transport.events.receive() } shouldBe null
+            }
+            observedCloseCode.get() shouldBe 0
         } finally {
             server.shutdown()
         }
