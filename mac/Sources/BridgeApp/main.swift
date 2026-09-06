@@ -24,16 +24,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUser
     private var callPanel: NSPanel?
     private var cancellables = Set<AnyCancellable>()
     private let updates = MacUpdateController()
+    private let presence = TrustedPresenceController()
+    private var menuBarVisibilityTimer: Timer?
+    private var menuBarIconHidden = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
 
-        // Pin the item near the RIGHT edge of the menu bar: a crowded menu bar hides the
-        // leftmost items first, so sitting rightmost keeps us visible. One-time migration
-        // (v1) so the user can still ⌘-drag it afterwards and have that position stick.
-        if !UserDefaults.standard.bool(forKey: "com.androidbridge.pinnedRight.v1") {
-            UserDefaults.standard.set(100.0, forKey: "NSStatusItem Preferred Position AndroidBridge")
-            UserDefaults.standard.set(true, forKey: "com.androidbridge.pinnedRight.v1")
+        // Pin the item as far RIGHT as a third-party item is allowed to sit, because a
+        // crowded menu bar hides the leftmost items first.
+        //
+        // The value is distance in points from the right edge, so SMALLER is further right.
+        // macOS reserves the right-hand cluster for itself — on a typical Mac the clock is
+        // at 66 and Control Center runs from 153 (BentoBox) out to 386 (Sound) — and it will
+        // not honour a third-party item placed inside that range. v1 asked for 100, landed
+        // in the reserved zone, and got pushed to the far left where it was the first thing
+        // hidden. 400 is immediately left of the system cluster: the rightmost slot actually
+        // available, so ours is the last third-party icon to be dropped.
+        if !UserDefaults.standard.bool(forKey: "com.androidbridge.pinnedRight.v2") {
+            UserDefaults.standard.set(400.0, forKey: "NSStatusItem Preferred Position AndroidBridge")
+            UserDefaults.standard.set(true, forKey: "com.androidbridge.pinnedRight.v2")
         }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.autosaveName = "AndroidBridge" // remember position if the user ⌘-drags it
@@ -49,6 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUser
         menu.addItem(appMenuItem("Open Bridge", action: #selector(openBridge), key: "o"))
         menu.addItem(appMenuItem("Open Meetings", action: #selector(openMeetings), key: "m"))
         menu.addItem(appMenuItem("Open Second Brain", action: #selector(openSecondBrain), key: "b"))
+        menu.addItem(appMenuItem("Open Trusted Presence", action: #selector(openTrustedPresence), key: "t"))
         menu.addItem(appMenuItem("Open Settings", action: #selector(openSettings), key: ","))
         menu.addItem(appMenuItem("Open Phone Screen", action: #selector(openScreen), key: "s"))
         menu.addItem(.separator())
@@ -59,14 +70,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUser
         diag("statusItem created: visible=\(statusItem.isVisible) hasButton=\(statusItem.button != nil) hasImage=\(statusItem.button?.image != nil)")
         // macOS silently hides status items when the menu bar is full. If ours is occluded,
         // fall back to a Dock icon so the app is always reachable, and tell the user why.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
-            let hidden = self.statusItem.button?.window?.occlusionState.contains(.visible) == false
-            self.diag("statusItem @6s: occludedByMenuBarOverflow=\(hidden)")
-            guard hidden else { return }
-            NSApp.setActivationPolicy(.regular)
-            self.showToast(title: "Menu bar is full",
-                           body: "macOS hid the Android Bridge icon — using a Dock icon instead. ⌘-drag other icons off the menu bar to make room.")
+        //
+        // Re-checked on a timer rather than once: the menu bar fills and empties as other
+        // apps come and go, and a one-shot check at 6s left the app unreachable whenever it
+        // was hidden later. The warning is shown only on the first transition into hidden.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { self.checkMenuBarVisibility(announce: true) }
+        let visibilityTimer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
+            self?.checkMenuBarVisibility(announce: false)
         }
+        RunLoop.main.add(visibilityTimer, forMode: .common)
+        self.menuBarVisibilityTimer = visibilityTimer
 
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(systemWillSleep), name: NSWorkspace.willSleepNotification, object: nil
@@ -100,12 +113,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUser
 
         openDashboard()
         updates.startAutomaticCheck()
+        presence.start()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         LinkManager.shared.stop()
         updates.cleanup()
+        presence.stop()  // never leave the Mac unlocked because the app went away
     }
 
     @objc private func systemWillSleep() { LinkManager.shared.prepareForSleep() }
@@ -157,7 +172,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUser
             w.isReleasedWhenClosed = false
             w.center()
             w.delegate = self
-            w.contentView = NSHostingView(rootView: DashboardView(link: LinkManager.shared, updates: updates))
+            w.contentView = NSHostingView(rootView: DashboardView(link: LinkManager.shared, updates: updates, presence: presence))
             window = w
             AppUIState.shared.window = w
         }
@@ -177,6 +192,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUser
 
     @objc func openSecondBrain() {
         AppUIState.shared.selectedTab = 2
+        openDashboard()
+    }
+
+    @objc func openTrustedPresence() {
+        AppUIState.shared.selectedTab = 4
         openDashboard()
     }
 
@@ -214,6 +234,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUser
         screenWindow?.makeKeyAndOrderFront(nil)
     }
 
+    /// Keeps the app reachable when macOS hides our menu bar icon: shows a Dock icon while
+    /// hidden, and drops back to menu-bar-only when the icon reappears.
+    private func checkMenuBarVisibility(announce: Bool) {
+        let hidden = statusItem.button?.window?.occlusionState.contains(.visible) == false
+        guard hidden != menuBarIconHidden || announce else { return }
+        menuBarIconHidden = hidden
+        diag("menu bar icon hidden=\(hidden)")
+        NSApp.setActivationPolicy(hidden ? .regular : .accessory)
+        guard hidden, announce else { return }
+        showToast(title: "Menu bar is full",
+                  body: "macOS hid the Android Bridge icon — using a Dock icon instead. ⌘-drag other icons off the menu bar, or hide some in System Settings ▸ Control Center, to make room.")
+    }
+
     private func diag(_ s: String) {
         let line = "[\(Int(Date().timeIntervalSince1970))] \(s)\n"
         let url = URL(fileURLWithPath: "/tmp/androidbridge-diag.txt")
@@ -234,19 +267,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUser
         panel.contentView = NSHostingView(rootView: ToastView(title: title, message: body) {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(copyText, forType: .string)
-        }.onTapGesture {
+        }.onTapGesture { [weak panel] in
             LinkManager.shared.handleNotificationClick(userInfo)
-            panel.orderOut(nil)
+            panel?.orderOut(nil)
         })
+        if toastPanels.count >= 5 {
+            let oldest = toastPanels.removeFirst()
+            oldest.contentView = nil
+            oldest.close()
+        }
         if let vf = NSScreen.main?.visibleFrame {
             let offset = CGFloat(96 + toastPanels.count * 92)
             panel.setFrameOrigin(NSPoint(x: vf.maxX - 376, y: vf.maxY - offset))
         }
         panel.orderFrontRegardless()
         toastPanels.append(panel)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-            panel.orderOut(nil)
-            self.toastPanels.removeAll { $0 == panel }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self, weak panel] in
+            guard let self, let panel else { return }
+            panel.contentView = nil
+            panel.close()
+            self.toastPanels.removeAll { $0 === panel }
         }
     }
 

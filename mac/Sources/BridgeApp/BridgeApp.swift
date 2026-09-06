@@ -36,6 +36,7 @@ final class AppUIState: ObservableObject {
 struct DashboardView: View {
     @ObservedObject var link: LinkManager
     @ObservedObject var updates: MacUpdateController
+    @ObservedObject var presence: TrustedPresenceController
     @State private var dropTargeted = false
     @State private var dialNumber = ""
     @State private var activityExpanded = false
@@ -190,6 +191,10 @@ struct DashboardView: View {
         SettingsTab(link: link, updates: updates)
             .tabItem { Label("Settings", systemImage: "gearshape") }
             .tag(3)
+
+        TrustedPresenceTab(presence: presence)
+            .tabItem { Label("Trusted Presence", systemImage: "lock.open.laptopcomputer") }
+            .tag(4)
         }
         .sheet(isPresented: $ui.showSetup) {
             SetupWizardView(link: link)

@@ -115,6 +115,14 @@ if let id = try? SelfSignedIdentity.generate(commonName: "spike-mac") {
     runner.expect("generates a self-signed cert", false)
 }
 
+// Trusted Presence — hardware-dependent, so informational rather than pass/fail.
+// Proves the sensor reads this Mac's router and Bluetooth without any permission prompt.
+print("\nℹ️  Trusted Presence sensing on this Mac:")
+print("ℹ️    Wi-Fi router address : \(PresenceSensor.wifiRouterAddress() ?? "not on Wi-Fi")")
+let pairedDevices = PresenceSensor.pairedBluetoothDevices()
+print("ℹ️    Paired Bluetooth     : \(pairedDevices.count) device(s), \(pairedDevices.filter(\.isConnected).count) connected")
+print("ℹ️    Screen lock now      : \(ScreenLockControl.requiresPassword() ? "password required" : "no password") ")
+
 print("\n— \(runner.passed) checks passed, \(runner.failures.count) failed —")
 if !runner.allPassed {
     for f in runner.failures { print(f) }
