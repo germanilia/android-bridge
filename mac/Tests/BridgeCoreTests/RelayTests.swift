@@ -73,28 +73,38 @@ final class RelayEnrollmentClientTests: XCTestCase {
 }
 
 final class URLSessionRelayTransportTests: XCTestCase {
-    func testFrameQueueSerializesAndPreservesOrder() {
+    func testFrameQueueSerializesAndPreservesOrder() throws {
         let queue = RelayFrameQueue()
         let first = Data([1])
         let second = Data([2])
         let third = Data([3])
 
-        XCTAssertEqual(queue.enqueue(first), first)
-        XCTAssertNil(queue.enqueue(second))
-        XCTAssertNil(queue.enqueue(third))
+        XCTAssertEqual(try queue.enqueue(first), first)
+        XCTAssertNil(try queue.enqueue(second))
+        XCTAssertNil(try queue.enqueue(third))
         XCTAssertEqual(queue.complete(), second)
         XCTAssertEqual(queue.complete(), third)
         XCTAssertNil(queue.complete())
     }
 
-    func testFrameQueueResetDropsStaleConnectionFrames() {
+    func testFrameQueueRejectsPendingBytesAboveLimit() throws {
+        let queue = RelayFrameQueue(maxPendingBytes: 2)
+        XCTAssertEqual(try queue.enqueue(Data([1])), Data([1]))
+        XCTAssertNil(try queue.enqueue(Data([2, 3])))
+
+        XCTAssertThrowsError(try queue.enqueue(Data([4]))) {
+            XCTAssertEqual($0 as? RelayError, .outboundQueueFull)
+        }
+    }
+
+    func testFrameQueueResetDropsStaleConnectionFrames() throws {
         let queue = RelayFrameQueue()
-        XCTAssertEqual(queue.enqueue(Data([1])), Data([1]))
-        XCTAssertNil(queue.enqueue(Data([2])))
+        XCTAssertEqual(try queue.enqueue(Data([1])), Data([1]))
+        XCTAssertNil(try queue.enqueue(Data([2])))
 
         queue.reset()
 
-        XCTAssertEqual(queue.enqueue(Data([3])), Data([3]))
+        XCTAssertEqual(try queue.enqueue(Data([3])), Data([3]))
         XCTAssertNil(queue.complete())
     }
 
@@ -287,6 +297,55 @@ final class RelayReplaySessionTests: XCTestCase {
         }
 
         XCTAssertEqual(delivered, [original])
+    }
+
+    func testRepeatedResumeRequestsReplayOneSuffixPerCursor() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let journal = try DurableSyncJournal(rootURL: root, actorId: "mac")
+        let sender = RelayReplaySession(journal: journal, actorId: "mac", peerActorId: "phone")
+        _ = try journal.enqueue(
+            operationId: "event-1",
+            kind: .tombstone,
+            target: "notes/a.md",
+            content: nil
+        )
+        let resume = ResumeRequest(cursor: SyncCursor(actorId: "mac", throughSequence: 0))
+        let message = try syncMessage(type: MessageTypes.syncResume, model: resume)
+
+        XCTAssertFalse(try sender.handle(message).outboundFrames.isEmpty)
+        XCTAssertTrue(try sender.handle(message).outboundFrames.isEmpty)
+    }
+
+    func testRepeatedGapOperationsRequestOneResumePerCursor() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let receiver = RelayReplaySession(
+            journal: try DurableSyncJournal(rootURL: root, actorId: "mac"),
+            actorId: "mac",
+            peerActorId: "phone"
+        )
+        receiver.setSyncOperationHandlers(snapshot: { _, _ in }, tombstone: { _ in })
+        let second = SyncOperation(
+            operationId: "event-2",
+            actorId: "phone",
+            sequence: 2,
+            kind: .tombstone,
+            target: "notes/b.md"
+        )
+        let third = SyncOperation(
+            operationId: "event-3",
+            actorId: "phone",
+            sequence: 3,
+            kind: .tombstone,
+            target: "notes/c.md"
+        )
+
+        let firstGap = try receiver.handle(syncMessage(type: MessageTypes.syncOperation, model: second))
+        let repeatedGap = try receiver.handle(syncMessage(type: MessageTypes.syncOperation, model: third))
+
+        XCTAssertEqual(firstGap.outboundFrames.count, 1)
+        XCTAssertTrue(repeatedGap.outboundFrames.isEmpty)
     }
 
     func testGapOperationAppliesWhenReplayedAfterMissingSequence() throws {

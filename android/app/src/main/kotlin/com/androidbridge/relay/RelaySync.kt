@@ -42,6 +42,8 @@ internal class AndroidRelayReplaySession(
     private val incoming = mutableMapOf<String, SyncOperation>()
     private val reassemblers = mutableMapOf<String, SyncTransferReassembler>()
     private val ignored = mutableSetOf<String>()
+    private var requestedResumeCursor: Long? = null
+    private var servedResumeCursor: Long? = null
 
     fun enqueue(message: Message): List<ByteArray> {
         if (ReplayClassifier.classify(message.type) == ReplayClassification.LIVE_ONLY) {
@@ -65,11 +67,13 @@ internal class AndroidRelayReplaySession(
             listOf(SyncCapability.DURABLE_SYNC, SyncCapability.RESUMABLE_TRANSFER, SyncCapability.NOTE_CONFLICTS),
         )
         val resume = ResumeRequest(SyncCursor(peerActorId, journal.receivedThrough(peerActorId)))
-        return buildList {
+        val frames = buildList {
             add(frame(MessageTypes.SYNC_CAPABILITIES, capability))
             add(frame(MessageTypes.SYNC_RESUME, resume))
             journal.pending().forEach { addAll(operationFrames(it)) }
         }
+        servedResumeCursor = journal.acknowledgedThrough
+        return frames
     }
 
     fun handle(message: Message): RelayReplayResult = when (message.type) {
@@ -82,6 +86,7 @@ internal class AndroidRelayReplaySession(
         MessageTypes.SYNC_TRANSFER_CHUNK -> accept(model<TransferChunk>(message))
         MessageTypes.SYNC_CAPABILITIES -> {
             model<CapabilityAnnouncement>(message)
+            requestedResumeCursor = null
             RelayReplayResult()
         }
         else -> RelayReplayResult(messages = listOf(message))
@@ -89,7 +94,10 @@ internal class AndroidRelayReplaySession(
 
     private fun resume(request: ResumeRequest): RelayReplayResult {
         require(request.cursor.actorId == actorId) { "Unexpected relay actor" }
-        return RelayReplayResult(outboundFrames = journal.pending(request.cursor.throughSequence).flatMap(::operationFrames))
+        if (servedResumeCursor == request.cursor.throughSequence) return RelayReplayResult()
+        val frames = journal.pending(request.cursor.throughSequence).flatMap(::operationFrames)
+        servedResumeCursor = request.cursor.throughSequence
+        return RelayReplayResult(outboundFrames = frames)
     }
 
     private fun apply(ack: SyncAcknowledgement) {
@@ -111,6 +119,8 @@ internal class AndroidRelayReplaySession(
             IncomingDisposition.GAP -> {
                 if (operation.blobDigest != null) ignored += operation.operationId
                 val cursor = SyncCursor(operation.actorId, journal.receivedThrough(operation.actorId))
+                if (requestedResumeCursor == cursor.throughSequence) return RelayReplayResult()
+                requestedResumeCursor = cursor.throughSequence
                 RelayReplayResult(outboundFrames = listOf(frame(MessageTypes.SYNC_RESUME, ResumeRequest(cursor))))
             }
             IncomingDisposition.APPLY -> acceptNew(operation)
@@ -121,6 +131,7 @@ internal class AndroidRelayReplaySession(
         if (operation.kind == SyncOperationKind.TOMBSTONE) {
             syncOperationApplier(operation, null)
             journal.recordApplied(operation)
+            requestedResumeCursor = null
             return RelayReplayResult(outboundFrames = listOf(acknowledgementFrame(operation)))
         }
         val digest = requireNotNull(operation.resultDigest)
@@ -151,6 +162,7 @@ internal class AndroidRelayReplaySession(
         }
         incoming -= chunk.operationId
         reassemblers -= chunk.operationId
+        requestedResumeCursor = null
         return RelayReplayResult(
             messages = emptyList(),
             outboundFrames = listOf(acknowledgementFrame(operation)),

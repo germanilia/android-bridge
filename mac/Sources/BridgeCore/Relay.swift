@@ -11,6 +11,7 @@ public enum RelayError: Error, Equatable, LocalizedError {
     case keychain(OSStatus)
     case notEnrolled
     case transportUnavailable
+    case outboundQueueFull
     case unexpectedMessage
 
     public var errorDescription: String? {
@@ -23,6 +24,7 @@ public enum RelayError: Error, Equatable, LocalizedError {
         case .keychain(let status): return "Keychain operation failed with status \(status)."
         case .notEnrolled: return "Enroll this Mac before enabling relay access."
         case .transportUnavailable: return "The relay connection is unavailable."
+        case .outboundQueueFull: return "The relay send queue exceeded its memory limit."
         case .unexpectedMessage: return "The relay sent an unexpected synchronization message."
         }
     }
@@ -277,22 +279,38 @@ public protocol RelayTransporting: AnyObject {
 }
 
 final class RelayFrameQueue {
+    private let maxPendingBytes: Int
     private var pending: [Data] = []
+    private var nextIndex = 0
+    private var pendingBytes = 0
     private var sending = false
 
-    func enqueue(_ frame: Data) -> Data? {
+    init(maxPendingBytes: Int = 64 * 1024 * 1024) {
+        precondition(maxPendingBytes > 0)
+        self.maxPendingBytes = maxPendingBytes
+    }
+
+    func enqueue(_ frame: Data) throws -> Data? {
         guard sending else { sending = true; return frame }
+        guard frame.count <= maxPendingBytes - pendingBytes else { throw RelayError.outboundQueueFull }
         pending.append(frame)
+        pendingBytes += frame.count
         return nil
     }
 
     func complete() -> Data? {
-        guard !pending.isEmpty else { sending = false; return nil }
-        return pending.removeFirst()
+        guard nextIndex < pending.count else { reset(); return nil }
+        let next = pending[nextIndex]
+        pending[nextIndex] = Data()
+        nextIndex += 1
+        pendingBytes -= next.count
+        return next
     }
 
     func reset() {
         pending.removeAll()
+        nextIndex = 0
+        pendingBytes = 0
         sending = false
     }
 }
@@ -340,7 +358,13 @@ public final class URLSessionRelayTransport: NSObject, RelayTransporting, URLSes
     public func send(_ data: Data) throws {
         lock.lock()
         guard let current = task else { lock.unlock(); throw RelayError.transportUnavailable }
-        let next = outbound.enqueue(data)
+        let next: Data?
+        do {
+            next = try outbound.enqueue(data)
+        } catch {
+            lock.unlock()
+            throw error
+        }
         lock.unlock()
         if let next { send(next, on: current) }
     }
@@ -491,6 +515,8 @@ public final class RelayReplaySession {
     private var incomingOperations: [String: SyncOperation] = [:]
     private var reassemblers: [String: SyncTransferReassembler] = [:]
     private var ignoredIncomingOperationIds: Set<String> = []
+    private var requestedResumeCursor: Int64?
+    private var servedResumeCursor: Int64?
     private var messageHandler: ((Message) throws -> Void)?
     private var snapshotHandler: ((SyncOperation, Data) throws -> Void)?
     private var tombstoneHandler: ((SyncOperation) throws -> Void)?
@@ -607,6 +633,7 @@ public final class RelayReplaySession {
             try RelaySyncMessageCodec.frame(RelaySyncMessageCodec.message(type: MessageTypes.syncResume, model: resume)),
         ]
         for operation in try journal.pending() { frames.append(contentsOf: try operationFrames(operation)) }
+        servedResumeCursor = journal.acknowledgedThrough
         return frames
     }
 
@@ -619,10 +646,12 @@ public final class RelayReplaySession {
         case MessageTypes.syncResume:
             let request = try RelaySyncMessageCodec.model(ResumeRequest.self, from: message)
             guard request.cursor.actorId == actorId else { throw RelayError.unexpectedMessage }
+            guard servedResumeCursor != request.cursor.throughSequence else { return RelayReplayResult() }
             var frames: [Data] = []
             for operation in try journal.pending(after: request.cursor.throughSequence) {
                 frames.append(contentsOf: try operationFrames(operation))
             }
+            servedResumeCursor = request.cursor.throughSequence
             return RelayReplayResult(outboundFrames: frames)
         case MessageTypes.syncOperation:
             return try accept(try RelaySyncMessageCodec.model(SyncOperation.self, from: message))
@@ -630,6 +659,7 @@ public final class RelayReplaySession {
             return try accept(try RelaySyncMessageCodec.model(TransferChunk.self, from: message))
         case MessageTypes.syncCapabilities:
             _ = try RelaySyncMessageCodec.model(CapabilityAnnouncement.self, from: message)
+            requestedResumeCursor = nil
             return RelayReplayResult()
         default:
             return RelayReplayResult(messages: [message])
@@ -653,6 +683,8 @@ public final class RelayReplaySession {
         case .gap:
             if operation.blobDigest != nil { ignoredIncomingOperationIds.insert(operation.operationId) }
             let cursor = try journal.receivedThrough(actorId: operation.actorId)
+            guard requestedResumeCursor != cursor else { return RelayReplayResult() }
+            requestedResumeCursor = cursor
             let resume = ResumeRequest(cursor: SyncCursor(actorId: operation.actorId, throughSequence: cursor))
             return RelayReplayResult(outboundFrames: [try RelaySyncMessageCodec.frame(RelaySyncMessageCodec.message(type: MessageTypes.syncResume, model: resume))])
         case .apply:
@@ -687,6 +719,7 @@ public final class RelayReplaySession {
             guard try journal.recordApplied(operation, durableApply: { try tombstoneHandler(operation) }) else {
                 return RelayReplayResult()
             }
+            requestedResumeCursor = nil
             return RelayReplayResult(
                 outboundFrames: [try acknowledgementFrame(operation)],
                 appliedOperations: [operation]
@@ -734,6 +767,7 @@ public final class RelayReplaySession {
         }
         incomingOperations.removeValue(forKey: chunk.operationId)
         reassemblers.removeValue(forKey: chunk.operationId)
+        requestedResumeCursor = nil
         return RelayReplayResult(
             messages: [],
             outboundFrames: [try acknowledgementFrame(operation)],

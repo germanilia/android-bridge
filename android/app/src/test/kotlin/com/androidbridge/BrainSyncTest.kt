@@ -10,7 +10,9 @@ import com.androidbridge.protocol.ConflictOutcome
 import com.androidbridge.protocol.Message
 import com.androidbridge.protocol.MessageCodec
 import com.androidbridge.protocol.MessageTypes
+import com.androidbridge.protocol.ResumeRequest
 import com.androidbridge.protocol.SyncAcknowledgement
+import com.androidbridge.protocol.SyncCursor
 import com.androidbridge.protocol.SyncModelCodec
 import com.androidbridge.protocol.SyncOperation
 import com.androidbridge.protocol.SyncOperationKind
@@ -148,6 +150,40 @@ class BrainSyncTest : StringSpec({
         } finally {
             senderRoot.deleteRecursively()
             receiverRoot.deleteRecursively()
+        }
+    }
+
+    "repeated resume requests replay one suffix per cursor" {
+        val root = Files.createTempDirectory("relay-resume-replay").toFile()
+        try {
+            val journal = DurableSyncJournal(root, "phone")
+            journal.enqueue("event-1", SyncOperationKind.TOMBSTONE, "notes/a.md", null)
+            val sender = AndroidRelayReplaySession(journal, "phone", "mac")
+            val resume = syncMessage(MessageTypes.SYNC_RESUME, ResumeRequest(SyncCursor("phone", 0)))
+
+            sender.handle(resume).outboundFrames.isEmpty() shouldBe false
+            sender.handle(resume).outboundFrames shouldBe emptyList()
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    "repeated relay gaps request one resume per cursor" {
+        val root = Files.createTempDirectory("relay-gap-resume").toFile()
+        try {
+            val receiver = AndroidRelayReplaySession(
+                DurableSyncJournal(root, "phone"),
+                "phone",
+                "mac",
+                syncOperationApplier = { _, _ -> },
+            )
+            val second = SyncOperation("event-2", "mac", 2, SyncOperationKind.TOMBSTONE, "notes/b.md")
+            val third = SyncOperation("event-3", "mac", 3, SyncOperationKind.TOMBSTONE, "notes/c.md")
+
+            receiver.handle(syncOperationMessage(second)).outboundFrames shouldHaveSize 1
+            receiver.handle(syncOperationMessage(third)).outboundFrames shouldBe emptyList()
+        } finally {
+            root.deleteRecursively()
         }
     }
 
