@@ -49,6 +49,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>Android Bridge reads calendar events to add meeting titles, participants, and customer suggestions to local meeting notes.</string>
     <key>NSCalendarsFullAccessUsageDescription</key>
     <string>Android Bridge reads calendar events to add meeting titles, participants, and customer suggestions to local meeting notes.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Android Bridge reads the name of the Wi-Fi network this Mac is on, to decide when to relax the lock screen. macOS ties Wi-Fi network names to Location access. No location is stored or sent anywhere.</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>Android Bridge checks whether a Bluetooth device you marked as trusted is connected, to decide when to relax this Mac's lock screen. Without this key macOS terminates the app the moment it reads the paired-device list.</string>
     <key>NSScreenCaptureUsageDescription</key>

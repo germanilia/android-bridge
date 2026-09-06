@@ -41,7 +41,7 @@ public enum ScreenLockControl {
         public var errorDescription: String? {
             switch self {
             case .noStoredPassword:
-                return "No login password saved. Add it in the Trusted Presence tab first."
+                return "Your macOS login password is not saved yet, so the wake password cannot be changed. Save it under \"Login password\" below."
             case .commandFailed(let message):
                 return "sysadminctl failed: \(message)"
             }
@@ -76,6 +76,11 @@ public enum ScreenLockControl {
 
     /// The password goes in on stdin rather than in the argument list, so it never appears
     /// in `ps` output for other processes on this Mac.
+    ///
+    /// Failure is detected by reading the output, not the exit status, because `sysadminctl`
+    /// exits 0 even when it refuses the request — verified: `sysadminctl -screenLock immediate`
+    /// with no password prints "Password is required!" and still exits 0. Do not "fix" this to
+    /// use `terminationStatus`; it would report every failure as a success.
     private static func runSysadminctl(_ arguments: [String], password: String?) -> (output: String, succeeded: Bool) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/sysadminctl")

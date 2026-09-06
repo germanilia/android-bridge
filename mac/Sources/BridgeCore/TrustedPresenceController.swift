@@ -7,7 +7,7 @@ import Combine
 /// functions in `TrustedPresence`, which is where the tests are.
 public final class TrustedPresenceController: ObservableObject {
 
-    @Published public private(set) var snapshot = PresenceSnapshot(wifiRouterAddress: nil, connectedBluetoothAddresses: [])
+    @Published public private(set) var snapshot = PresenceSnapshot(wifiSSID: nil, connectedBluetoothAddresses: [])
     @Published public private(set) var matched: [TrustedPlace] = []
     @Published public private(set) var isHoldingAwake = false
     @Published public private(set) var passwordRequired = true
@@ -22,6 +22,7 @@ public final class TrustedPresenceController: ObservableObject {
 
     public var isTrusted: Bool { !matched.isEmpty }
     public let passwords = LoginPasswordStore()
+    public let location = LocationAccess()
 
     private let store: TrustedPresenceStore
     private var timer: Timer?
@@ -72,15 +73,6 @@ public final class TrustedPresenceController: ObservableObject {
         apply(TrustedPresence.plan(settings: settings, isTrusted: isTrusted))
     }
 
-    /// Adds the Wi-Fi network the Mac is on right now.
-    /// A mesh network hands out a different router address per access point, so the same
-    /// home may legitimately need more than one entry — hence "add the one I'm on" rather
-    /// than a list to pick from.
-    public func trustCurrentWifi(label: String) {
-        guard let address = snapshot.wifiRouterAddress else { return }
-        add(TrustedPlace(kind: .wifi, identifier: address, label: label))
-    }
-
     public func add(_ place: TrustedPlace) {
         guard !settings.places.contains(where: { $0.id == place.id }) else { return }
         settings.places.append(place)
@@ -102,7 +94,13 @@ public final class TrustedPresenceController: ObservableObject {
             appDisabledIt: appDisabledLockPassword
         )
         passwordRequired = current
-        guard let action else { return }
+        guard let action else {
+            // Nothing to change means nothing is wrong. Without this, an error raised once —
+            // "no login password saved", say — outlived the thing that caused it and sat on
+            // screen contradicting the rest of the tab.
+            lastError = nil
+            return
+        }
 
         do {
             try ScreenLockControl.setPasswordRequired(action == .restore)

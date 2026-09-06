@@ -74,7 +74,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUser
         // Re-checked on a timer rather than once: the menu bar fills and empties as other
         // apps come and go, and a one-shot check at 6s left the app unreachable whenever it
         // was hidden later. The warning is shown only on the first transition into hidden.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { self.checkMenuBarVisibility(announce: true) }
+        // Not at 6s: the menu bar is still laying itself out then and reports a false
+        // "hidden", which cost an unnecessary policy flip. First real check at 20s.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20) { self.checkMenuBarVisibility(announce: true) }
         let visibilityTimer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
             self?.checkMenuBarVisibility(announce: false)
         }
@@ -170,6 +172,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUser
                              styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
             w.title = "Android Bridge"
             w.isReleasedWhenClosed = false
+            // Without this an accessory app's window is treated as transient: macOS parks it
+            // in its own Space and refuses to let it be dragged to another desktop.
+            // `.managed` makes it an ordinary window that belongs to a Space like any other.
+            w.collectionBehavior = [.managed, .participatesInCycle, .fullScreenPrimary]
             w.center()
             w.delegate = self
             w.contentView = NSHostingView(rootView: DashboardView(link: LinkManager.shared, updates: updates, presence: presence))
@@ -238,13 +244,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @preconcurrency UNUser
     /// hidden, and drops back to menu-bar-only when the icon reappears.
     private func checkMenuBarVisibility(announce: Bool) {
         let hidden = statusItem.button?.window?.occlusionState.contains(.visible) == false
-        guard hidden != menuBarIconHidden || announce else { return }
+        let changed = hidden != menuBarIconHidden
+        guard changed || announce else { return }
         menuBarIconHidden = hidden
-        diag("menu bar icon hidden=\(hidden)")
-        NSApp.setActivationPolicy(hidden ? .regular : .accessory)
+        if changed { diag("menu bar icon hidden=\(hidden)") }
+        applyActivationPolicy()
         guard hidden, announce else { return }
         showToast(title: "Menu bar is full",
                   body: "macOS hid the Android Bridge icon — using a Dock icon instead. ⌘-drag other icons off the menu bar, or hide some in System Settings ▸ Control Center, to make room.")
+    }
+
+    /// Shows a Dock icon only while the menu bar icon is hidden.
+    ///
+    /// Deferred while a window is on screen: changing activation policy re-parents every open
+    /// window, and macOS can strand one in a Space of its own that cannot be dragged to
+    /// another desktop. Nothing is lost by waiting — the Dock icon exists to reach the app
+    /// when no window is showing, which is exactly when this is allowed to run.
+    private func applyActivationPolicy() {
+        guard window?.isVisible != true else { return }
+        NSApp.setActivationPolicy(menuBarIconHidden ? .regular : .accessory)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === window else { return }
+        DispatchQueue.main.async { self.applyActivationPolicy() }
     }
 
     private func diag(_ s: String) {

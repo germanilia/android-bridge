@@ -126,3 +126,65 @@ Three bugs that only appear in the signed `.app`, never in `swift run` or a CLI 
 **Lesson for this increment:** a CLI probe cannot validate TCC behaviour or menu bar layout.
 Verify by launching the signed bundle with `open` and watching `log stream` plus
 `/tmp/androidbridge-diag.txt`.
+
+## Change: Wi-Fi matched by network name, not router address (2026-09-06)
+
+The router-MAC design had a usability wall the user hit immediately: a network can only be
+learned while connected to it, so "trust this network" could only ever offer the one you were
+on, and there was no way to add a second. The request was a picker like the Bluetooth one.
+
+A picker of names requires matching by name, and reading the current network's name requires
+Location authorization — the thing the original design avoided. The user chose the picker
+after being shown the trade-off.
+
+**What changed**
+
+| Before | After |
+|---|---|
+| `.wifi` identifier = router MAC from `ipconfig` + `arp` | `.wifi` identifier = network name (SSID) from CoreWLAN |
+| No permission | `NSLocationWhenInUseUsageDescription` + `CLLocationManager` authorization |
+| Add only the network you are on | Pick any of the ~116 networks this Mac remembers, via `networksetup -listpreferredwirelessnetworks en0` (needs no permission) |
+| One entry per mesh access point | One entry covers a whole mesh |
+| Spoofable only by copying a MAC | Spoofable by broadcasting the name |
+
+`TrustedPresence.comparable(kind:_:)` now decides comparison per kind: Bluetooth addresses are
+normalized, network names are compared exactly. Names are case-sensitive and may contain `:`
+or `-`, so running them through MAC normalization would corrupt them —
+`testNetworkNameWithAddressLikeCharactersIsNotNormalized` holds that line.
+
+**Migration.** Settings written by the previous build hold a router MAC in a `.wifi` entry and
+would silently never match again. `TrustedPresence.migrate(places:)` rewrites such an entry to
+the label the user gave it (the real case on this Mac: identifier `d4:35:1d:4f:c1:8d`, label
+`fox5` → identifier `fox5`), and drops entries whose label carries no name — an empty label,
+another address, or the old auto-generated `"Wi-Fi <last 5 of address>"`. Dropping beats
+keeping: a place that can never match must not sit in the list looking as though it works.
+The upgrade is written back on first load so stored settings match what is in use.
+
+**Picker usability.** This Mac remembers 116 networks, so the list is searchable above 8
+entries and ordered: the network you are on, then trusted ones, then the rest alphabetically.
+
+**If Location is denied** the Wi-Fi section says so and offers a button to System Settings.
+No Wi-Fi entry can match, so the Mac simply stays locked — failing closed, which is correct.
+
+## UI and window fixes (2026-09-06)
+
+**1. Long lists get their own scroll area.** 116 remembered networks in a `Form` made the tab
+scroll forever. Both pickers are now a `ScrollView` + `LazyVStack` at a fixed height (Wi-Fi 260,
+Bluetooth 220) with a search field over the Wi-Fi list and an "N trusted of M" count under each,
+so the page stays one readable length no matter how many networks or devices the Mac knows.
+
+**2. The dashboard opened in its own Space and could not be dragged to another desktop.**
+Two causes, both fixed in `main.swift`:
+
+- The window never set `collectionBehavior`. An `.accessory` app's window is treated as
+  transient, so macOS parks it in a Space of its own. Now
+  `[.managed, .participatesInCycle, .fullScreenPrimary]` — an ordinary window that belongs to a
+  Space like any other.
+- `checkMenuBarVisibility` called `NSApp.setActivationPolicy` whenever the menu bar icon
+  appeared or disappeared, including while the dashboard was open. Changing activation policy
+  re-parents every open window and can strand one. `applyActivationPolicy()` now defers while
+  a window is visible and runs on `windowWillClose` instead. Nothing is lost: the Dock icon
+  exists to reach the app when no window is showing, which is exactly when it may now change.
+
+The one-shot check also moved from 6s to 20s — the 6s reading was demonstrably a false
+"hidden" (`hidden=true` at ..288, `hidden=false` at ..289) and cost a needless policy flip.

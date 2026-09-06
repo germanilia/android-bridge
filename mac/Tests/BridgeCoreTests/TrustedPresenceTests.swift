@@ -5,40 +5,40 @@ import XCTest
 /// The decision must be pure and total: same inputs, same answer, no I/O.
 final class TrustedPresenceTests: XCTestCase {
 
-    private let homeWifi = TrustedPlace(kind: .wifi, identifier: "cc:2d:21:5d:f2:e0", label: "Home")
+    private let homeWifi = TrustedPlace(kind: .wifi, identifier: "fox5", label: "fox5")
     private let phone = TrustedPlace(kind: .bluetooth, identifier: "64:b5:f2:fd:07:a8", label: "Ilia's S23 Ultra")
 
     func testNoTrustedPlacesIsNeverTrusted() {
-        let snapshot = PresenceSnapshot(wifiRouterAddress: "cc:2d:21:5d:f2:e0", connectedBluetoothAddresses: ["64:b5:f2:fd:07:a8"])
+        let snapshot = PresenceSnapshot(wifiSSID: "fox5", connectedBluetoothAddresses: ["64:b5:f2:fd:07:a8"])
         XCTAssertEqual(TrustedPresence.present(in: snapshot, trusted: []), [])
     }
 
     func testMatchingWifiRouterIsTrusted() {
-        let snapshot = PresenceSnapshot(wifiRouterAddress: "cc:2d:21:5d:f2:e0", connectedBluetoothAddresses: [])
+        let snapshot = PresenceSnapshot(wifiSSID: "fox5", connectedBluetoothAddresses: [])
         XCTAssertEqual(TrustedPresence.present(in: snapshot, trusted: [homeWifi, phone]), [homeWifi])
     }
 
     func testConnectedBluetoothDeviceIsTrustedWithoutWifi() {
-        let snapshot = PresenceSnapshot(wifiRouterAddress: nil, connectedBluetoothAddresses: ["64:b5:f2:fd:07:a8"])
+        let snapshot = PresenceSnapshot(wifiSSID: nil, connectedBluetoothAddresses: ["64:b5:f2:fd:07:a8"])
         XCTAssertEqual(TrustedPresence.present(in: snapshot, trusted: [homeWifi, phone]), [phone])
     }
 
     func testPairedButDisconnectedBluetoothIsNotTrusted() {
-        let snapshot = PresenceSnapshot(wifiRouterAddress: nil, connectedBluetoothAddresses: [])
+        let snapshot = PresenceSnapshot(wifiSSID: nil, connectedBluetoothAddresses: [])
         XCTAssertEqual(TrustedPresence.present(in: snapshot, trusted: [phone]), [])
     }
 
-    func testDifferentRouterOnSameKindIsNotTrusted() {
-        let snapshot = PresenceSnapshot(wifiRouterAddress: "aa:bb:cc:dd:ee:ff", connectedBluetoothAddresses: [])
+    func testDifferentNetworkOnSameKindIsNotTrusted() {
+        let snapshot = PresenceSnapshot(wifiSSID: "Company-Guest", connectedBluetoothAddresses: [])
         XCTAssertEqual(TrustedPresence.present(in: snapshot, trusted: [homeWifi]), [])
     }
 
     /// A Wi-Fi router and a Bluetooth device could in principle share an address string.
     /// They must never satisfy each other.
     func testKindsDoNotCrossMatch() {
-        let wifiWithPhoneAddress = TrustedPlace(kind: .wifi, identifier: "64:b5:f2:fd:07:a8", label: "Impostor")
-        let snapshot = PresenceSnapshot(wifiRouterAddress: nil, connectedBluetoothAddresses: ["64:b5:f2:fd:07:a8"])
-        XCTAssertEqual(TrustedPresence.present(in: snapshot, trusted: [wifiWithPhoneAddress]), [])
+        let wifiNamedLikeTheAddress = TrustedPlace(kind: .wifi, identifier: "64:b5:f2:fd:07:a8", label: "Impostor")
+        let snapshot = PresenceSnapshot(wifiSSID: nil, connectedBluetoothAddresses: ["64:b5:f2:fd:07:a8"])
+        XCTAssertEqual(TrustedPresence.present(in: snapshot, trusted: [wifiNamedLikeTheAddress]), [])
     }
 
     // MARK: - Address normalization
@@ -53,10 +53,35 @@ final class TrustedPresenceTests: XCTestCase {
         XCTAssertEqual(TrustedPresence.normalize("64-B5-F2-FD-07-A8"), "64:b5:f2:fd:07:a8")
     }
 
-    func testUnpaddedArpOutputMatchesStoredPlace() {
-        let snapshot = PresenceSnapshot(wifiRouterAddress: "cc:2d:21:5d:f2:e0", connectedBluetoothAddresses: [])
-        let stored = TrustedPlace(kind: .wifi, identifier: "CC-2D-21-5D-F2-E0", label: "Home")
+    /// IOBluetooth reports dashes and uppercase; stored places may hold either form.
+    func testBluetoothAddressFormatsCompareEqual() {
+        let snapshot = PresenceSnapshot(wifiSSID: nil, connectedBluetoothAddresses: ["64-B5-F2-FD-07-A8"])
+        let stored = TrustedPlace(kind: .bluetooth, identifier: "64:b5:f2:fd:07:a8", label: "Phone")
         XCTAssertEqual(TrustedPresence.present(in: snapshot, trusted: [stored]), [stored])
+    }
+
+    /// Network names are names, not addresses: they are matched exactly, never normalized.
+    /// "Sela" and "sela" are two different networks as far as macOS is concerned.
+    func testNetworkNamesAreCaseSensitive() {
+        let snapshot = PresenceSnapshot(wifiSSID: "sela", connectedBluetoothAddresses: [])
+        let wrongCase = TrustedPlace(kind: .wifi, identifier: "Sela", label: "Sela")
+        XCTAssertEqual(TrustedPresence.present(in: snapshot, trusted: [wrongCase]), [])
+    }
+
+    /// A name with punctuation that looks like an address must not be mangled by normalization.
+    func testNetworkNameWithAddressLikeCharactersIsNotNormalized() {
+        let snapshot = PresenceSnapshot(wifiSSID: "AP-5:2", connectedBluetoothAddresses: [])
+        let stored = TrustedPlace(kind: .wifi, identifier: "AP-5:2", label: "AP-5:2")
+        XCTAssertEqual(TrustedPresence.present(in: snapshot, trusted: [stored]), [stored])
+    }
+
+    /// Several networks can be trusted at once, without ever visiting them.
+    func testManyNetworksCanBeTrustedAndOnlyThePresentOneMatches() {
+        let places = ["fox5", "fox-mesh", "sela", "Running_Fox"].map {
+            TrustedPlace(kind: .wifi, identifier: $0, label: $0)
+        }
+        let snapshot = PresenceSnapshot(wifiSSID: "sela", connectedBluetoothAddresses: [])
+        XCTAssertEqual(TrustedPresence.present(in: snapshot, trusted: places).map(\.identifier), ["sela"])
     }
 
     // MARK: - Settings round-trip
@@ -203,14 +228,51 @@ extension TrustedPresenceTests {
     func testBluetoothIsNotReadWhenNoBluetoothDeviceIsTrusted() {
         XCTAssertFalse(TrustedPresence.needsBluetooth(places: []))
         XCTAssertFalse(TrustedPresence.needsBluetooth(places: [
-            TrustedPlace(kind: .wifi, identifier: "cc:2d:21:5d:f2:e0", label: "Home")
+            TrustedPlace(kind: .wifi, identifier: "fox5", label: "fox5")
         ]))
     }
 
     func testBluetoothIsReadWhenADeviceIsTrusted() {
         XCTAssertTrue(TrustedPresence.needsBluetooth(places: [
-            TrustedPlace(kind: .wifi, identifier: "cc:2d:21:5d:f2:e0", label: "Home"),
+            TrustedPlace(kind: .wifi, identifier: "fox5", label: "fox5"),
             TrustedPlace(kind: .bluetooth, identifier: "64:b5:f2:fd:07:a8", label: "Phone"),
         ]))
+    }
+}
+
+/// Wi-Fi places used to store the router's MAC address; they now store the network name.
+/// Settings saved by the older build must not silently stop matching.
+extension TrustedPresenceTests {
+    func testOldRouterAddressEntryIsMigratedToItsNetworkName() {
+        let old = TrustedPlace(kind: .wifi, identifier: "d4:35:1d:4f:c1:8d", label: "fox5")
+        XCTAssertEqual(
+            TrustedPresence.migrate(places: [old]),
+            [TrustedPlace(kind: .wifi, identifier: "fox5", label: "fox5")]
+        )
+    }
+
+    /// An auto-generated label carries no network name, so there is nothing to migrate to.
+    /// Dropping it is correct: a place that can never match must not sit in the list
+    /// looking as though it protects something.
+    func testOldEntryWithNoUsableNameIsDropped() {
+        let old = TrustedPlace(kind: .wifi, identifier: "d4:35:1d:4f:c1:8d", label: "Wi-Fi c1:8d")
+        XCTAssertEqual(TrustedPresence.migrate(places: [old]), [])
+    }
+
+    func testBluetoothPlacesAreLeftAloneByMigration() {
+        let device = TrustedPlace(kind: .bluetooth, identifier: "68:d9:3c:77:71:7e", label: "Ilia's Mouse")
+        XCTAssertEqual(TrustedPresence.migrate(places: [device]), [device])
+    }
+
+    func testAlreadyMigratedNetworksAreUntouched() {
+        let current = TrustedPlace(kind: .wifi, identifier: "fox5", label: "fox5")
+        XCTAssertEqual(TrustedPresence.migrate(places: [current]), [current])
+    }
+
+    /// A network genuinely named like an address would be destroyed by a naive rule,
+    /// so migration only rewrites when the label offers a different, non-address name.
+    func testNetworkNamedLikeAnAddressSurvivesWhenLabelMatchesIt() {
+        let odd = TrustedPlace(kind: .wifi, identifier: "d4:35:1d:4f:c1:8d", label: "d4:35:1d:4f:c1:8d")
+        XCTAssertEqual(TrustedPresence.migrate(places: [odd]), [])
     }
 }
