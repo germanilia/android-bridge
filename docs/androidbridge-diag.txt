@@ -1,0 +1,333 @@
+[1787753019] statusItem created: visible=true hasButton=true hasImage=true
+[1787753023] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753024] LINK AUTO_MEETING watcher started
+[1787753024] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753024] LINK conn state=preparing initiator=true
+[1787753024] LINK conn state=ready initiator=true
+[1787753025] statusItem @6s: occludedByMenuBarOverflow=false
+[1787753039] LINK MEETING_CONTENT mirrored=68
+[1787753043] LINK MEETING_CONTENT mirrored=68
+[1787753145] LINK rx ended err=nil complete=true → cancel
+[1787753145] LINK conn state=cancelled initiator=true
+[1787753157] LINK browse results:
+[1787753169] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753169] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753169] LINK conn state=preparing initiator=true
+[1787753169] LINK conn state=ready initiator=true
+[1787753176] LINK browse results:
+[1787753179] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753207] LINK browse results:
+[1787753211] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753524] LINK rx ended err=nil complete=true → cancel
+[1787753524] LINK conn state=cancelled initiator=true
+[1787753532] LINK browse results:
+[1787753536] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753536] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753536] LINK conn state=preparing initiator=true
+[1787753536] LINK conn state=ready initiator=true
+[1787753583] LINK browse results:
+[1787753593] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753601] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753826] LINK rx ended err=nil complete=true → cancel
+[1787753826] LINK conn state=cancelled initiator=true
+[1787753831] LINK browse results:
+[1787753838] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753838] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753838] LINK conn state=preparing initiator=true
+[1787753838] LINK conn state=ready initiator=true
+[1787753907] LINK rx ended err=nil complete=true → cancel
+[1787753907] LINK conn state=cancelled initiator=true
+[1787753914] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753914] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753914] LINK conn state=preparing initiator=true
+[1787753914] LINK conn state=ready initiator=true
+[1787753919] LINK rx ended err=nil complete=true → cancel
+[1787753919] LINK conn state=cancelled initiator=true
+[1787753924] LINK browse results:
+[1787753933] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753933] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753933] LINK conn state=preparing initiator=true
+[1787753934] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753934] LINK conn state=ready initiator=true
+[1787753944] LINK rx ended err=nil complete=true → cancel
+[1787753944] LINK conn state=cancelled initiator=true
+[1787753960] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753960] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753960] LINK conn state=preparing initiator=true
+[1787753961] LINK conn state=ready initiator=true
+[1787753963] LINK rx ended err=nil complete=true → cancel
+[1787753963] LINK conn state=cancelled initiator=true
+[1787753995] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753995] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787753995] LINK conn state=preparing initiator=true
+[1787753995] LINK conn state=ready initiator=true
+[1787754041] LINK rx ended err=nil complete=true → cancel
+[1787754041] LINK conn state=cancelled initiator=true
+[1787754046] LINK browse results:
+[1787754050] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787754050] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787754050] LINK conn state=preparing initiator=true
+[1787754050] LINK conn state=ready initiator=true
+[1787754065] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787756804] LINK rx ended err=nil complete=true → cancel
+[1787756804] LINK conn state=cancelled initiator=true
+[1787756817] LINK browse results:
+[1787756827] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787756827] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787756827] LINK conn state=preparing initiator=true
+[1787756827] LINK conn state=ready initiator=true
+[1787756828] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787756833] LINK rx ended err=nil complete=true → cancel
+[1787756833] LINK conn state=cancelled initiator=true
+[1787756835] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787756835] LINK conn state=preparing initiator=true
+[1787756835] LINK conn state=ready initiator=true
+[1787756837] LINK rx ended err=nil complete=true → cancel
+[1787756837] LINK conn state=cancelled initiator=true
+[1787756841] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787756841] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787756841] LINK conn state=preparing initiator=true
+[1787756841] LINK conn state=ready initiator=true
+[1787758116] LINK rx ended err=POSIXErrorCode(rawValue: 60): Operation timed out complete=true → cancel
+[1787758116] LINK conn state=failed(POSIXErrorCode(rawValue: 60): Operation timed out) initiator=true
+[1787758116] LINK conn state=cancelled initiator=true
+[1787758118] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787758118] LINK conn state=preparing initiator=true
+[1787758123] LINK conn state=cancelled initiator=true
+[1787758123] ACTIVE_CALL_PANEL name=Ido Cohen Vplans
+[1787758123] ACTIVE_CALL_PANEL name=Ido Cohen Vplans
+[1787758124] CALL_PANEL_DISMISS
+[1787758124] CALL_PANEL_DISMISS
+[1787758124] ACTIVE_CALL_PANEL name=
+[1787758124] ACTIVE_CALL_PANEL name=
+[1787758124] CALL_PANEL_DISMISS
+[1787758124] CALL_PANEL_DISMISS
+[1787758124] ACTIVE_CALL_PANEL name=
+[1787758124] ACTIVE_CALL_PANEL name=
+[1787758124] CALL_PANEL_DISMISS
+[1787758124] CALL_PANEL_DISMISS
+[1787758124] ACTIVE_CALL_PANEL name=Fox ♥️
+[1787758124] ACTIVE_CALL_PANEL name=Fox ♥️
+[1787758124] CALL_PANEL_DISMISS
+[1787758124] CALL_PANEL_DISMISS
+[1787758124] ACTIVE_CALL_PANEL name=Ido Cohen Vplans
+[1787758124] ACTIVE_CALL_PANEL name=Ido Cohen Vplans
+[1787758124] CALL_PANEL_DISMISS
+[1787758124] CALL_PANEL_DISMISS
+[1787758124] ACTIVE_CALL_PANEL name=
+[1787758124] ACTIVE_CALL_PANEL name=
+[1787758124] CALL_PANEL_DISMISS
+[1787758124] TOAST_FIRED title=SMS from VIPBT
+[1787758124] TOAST_FIRED title=SMS from Isracard
+[1787758124] CALL_PANEL_DISMISS
+[1787758124] ACTIVE_CALL_PANEL name=
+[1787758124] ACTIVE_CALL_PANEL name=
+[1787758124] CALL_PANEL_DISMISS
+[1787758124] CALL_PANEL_DISMISS
+[1787758124] ACTIVE_CALL_PANEL name=Ido Cohen Vplans
+[1787758124] ACTIVE_CALL_PANEL name=Ido Cohen Vplans
+[1787758124] CALL_PANEL_DISMISS
+[1787758124] CALL_PANEL_DISMISS
+[1787761711] LINK browse results:
+[1787761719] LINK browse results:
+[1787762413] TOAST_FIRED title=SMS from *5522
+[1787762413] TOAST_FIRED title=SMS from max
+[1787762413] TOAST_FIRED title=SMS from HYPERTOY
+[1787762413] ACTIVE_CALL_PANEL name=Fox ♥️
+[1787762413] ACTIVE_CALL_PANEL name=Fox ♥️
+[1787762413] CALL_PANEL_DISMISS
+[1787762413] CALL_PANEL_DISMISS
+[1787762413] ACTIVE_CALL_PANEL name=
+[1787762413] ACTIVE_CALL_PANEL name=
+[1787762413] CALL_PANEL_DISMISS
+[1787762413] CALL_PANEL_DISMISS
+[1787765639] TOAST_FIRED title=SMS from kadosh
+[1787767119] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787767119] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787767119] LINK conn state=preparing initiator=true
+[1787767119] LINK conn state=ready initiator=true
+[1787767248] TOAST_FIRED title=SMS from 0559396455
+[1787768225] LINK rx ended err=nil complete=true → cancel
+[1787768225] LINK conn state=cancelled initiator=true
+[1787768230] LINK browse results:
+[1787768332] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787768332] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787768332] LINK conn state=preparing initiator=true
+[1787768332] LINK conn state=ready initiator=true
+[1787768347] LINK rx ended err=nil complete=true → cancel
+[1787768347] LINK conn state=cancelled initiator=true
+[1787768347] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787768347] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787768347] LINK conn state=preparing initiator=true
+[1787768347] LINK conn state=ready initiator=true
+[1787768376] LINK browse results:
+[1787768422] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787793015] LINK browse results:
+[1787793073] LINK rx ended err=POSIXErrorCode(rawValue: 54): Connection reset by peer complete=true → cancel
+[1787793073] LINK conn state=failed(POSIXErrorCode(rawValue: 54): Connection reset by peer) initiator=true
+[1787793073] LINK conn state=cancelled initiator=true
+[1787793074] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787793074] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787793074] LINK conn state=preparing initiator=true
+[1787793074] LINK conn state=ready initiator=true
+[1787807893] LINK rx ended err=nil complete=true → cancel
+[1787807893] LINK conn state=cancelled initiator=true
+[1787807908] LINK browse results:
+[1787807943] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787807943] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787807943] LINK conn state=preparing initiator=true
+[1787807949] LINK conn state=cancelled initiator=true
+[1787807958] LINK browse results:
+[1787816539] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787816539] LINK conn state=preparing initiator=true
+[1787816545] LINK conn state=cancelled initiator=true
+[1787816569] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787816569] LINK conn state=preparing initiator=true
+[1787816573] LINK conn state=cancelled initiator=true
+[1787822559] LINK AUTO_MEETING detected app=Teams
+[1787822564] LINK MEETING_CONTENT mirrored=69
+[1787822622] LINK MEETING_CONTENT mirrored=69
+[1787822641] LINK MEETING_CONTENT mirrored=69
+[1787822672] LINK MEETING_CONTENT mirrored=69
+[1787822702] LINK MEETING_CONTENT mirrored=69
+[1787822735] LINK MEETING_CONTENT mirrored=69
+[1787822765] LINK MEETING_CONTENT mirrored=69
+[1787822775] LINK AUTO_MEETING ended
+[1787822782] LINK MEETING_CONTENT mirrored=69
+[1787822798] LINK MEETING_CONTENT mirrored=69
+[1787822816] LINK MEETING_CONTENT mirrored=69
+[1787822824] LINK MEETING_CONTENT mirrored=69
+[1787822828] LINK MEETING_CONTENT mirrored=69
+[1787831085] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787831085] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787831085] LINK conn state=preparing initiator=true
+[1787831085] LINK conn state=ready initiator=true
+[1787831170] CALL_PANEL_FIRED name=
+[1787831171] CALL_PANEL_FIRED name=Ido Cohen Vplans
+[1787831174] ACTIVE_CALL_PANEL name=Ido Cohen Vplans
+[1787831174] ACTIVE_CALL_PANEL name=Ido Cohen Vplans
+[1787831199] CALL_PANEL_FIRED name=
+[1787831200] CALL_PANEL_FIRED name=0732302999
+[1787831215] ACTIVE_CALL_PANEL name=0732302999
+[1787831215] ACTIVE_CALL_PANEL name=0732302999
+[1787831819] CALL_PANEL_DISMISS
+[1787831820] CALL_PANEL_DISMISS
+[1787832870] LINK browse results:
+[1787832936] LINK rx ended err=POSIXErrorCode(rawValue: 60): Operation timed out complete=true → cancel
+[1787832936] LINK conn state=failed(POSIXErrorCode(rawValue: 60): Operation timed out) initiator=true
+[1787832936] LINK conn state=cancelled initiator=true
+[1787832938] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787832938] LINK conn state=preparing initiator=true
+[1787832943] LINK conn state=cancelled initiator=true
+[1787846201] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787846201] LINK conn state=preparing initiator=true
+[1787846206] LINK conn state=cancelled initiator=true
+[1787846231] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787846231] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787846231] LINK conn state=preparing initiator=true
+[1787846231] LINK conn state=cancelled initiator=true
+[1787846246] LINK browse results:
+[1787846277] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787846277] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787846277] LINK conn state=preparing initiator=true
+[1787846282] LINK conn state=cancelled initiator=true
+[1787846341] LINK browse results:
+[1787846355] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787846355] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787846355] LINK conn state=preparing initiator=true
+[1787846355] LINK conn state=ready initiator=true
+[1787846954] LINK rx ended err=nil complete=true → cancel
+[1787846954] LINK conn state=cancelled initiator=true
+[1787846970] LINK browse results:
+[1787846973] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787846973] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787846973] LINK conn state=preparing initiator=true
+[1787846973] LINK conn state=ready initiator=true
+[1787847017] LINK browse results:
+[1787848503] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787848504] LINK rx ended err=POSIXErrorCode(rawValue: 54): Connection reset by peer complete=true → cancel
+[1787848504] LINK conn state=cancelled initiator=true
+[1787848544] LINK browse results:
+[1787852962] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787852962] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787852962] LINK conn state=preparing initiator=true
+[1787852964] LINK conn state=ready initiator=true
+[1787853003] LINK browse results:
+[1787853100] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787853106] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787853106] LINK rx ended err=nil complete=true → cancel
+[1787853106] LINK conn state=cancelled initiator=true
+[1787853106] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787853106] LINK conn state=preparing initiator=true
+[1787853106] LINK conn state=ready initiator=true
+[1787853144] LINK browse results:
+[1787853166] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787853167] LINK browse results: Pixel 9a@AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787863818] LINK rx ended err=POSIXErrorCode(rawValue: 60): Operation timed out complete=true → cancel
+[1787863818] LINK conn state=failed(POSIXErrorCode(rawValue: 60): Operation timed out) initiator=true
+[1787863818] LINK conn state=cancelled initiator=true
+[1787863820] LINK dialing Pixel 9a endpoint=AndroidBridge-Pixel\0329a._androidbridge._tcp.local.
+[1787863820] LINK conn state=preparing initiator=true
+[1787863824] LINK conn state=cancelled initiator=true
+[1787863825] TOAST_FIRED title=SMS from 0508084836
+[1787863825] TOAST_FIRED title=SMS from Shufersal
+[1787863825] TOAST_FIRED title=SMS from B FRESH
+[1787863825] TOAST_FIRED title=SMS from Dossinet
+[1787863826] TOAST_FIRED title=SMS from Dossinet
+[1787863826] TOAST_FIRED title=SMS from Dossinet
+[1787863826] TOAST_FIRED title=SMS from TWILIO
+[1787863826] TOAST_FIRED title=SMS from sdaroTV
+[1787863826] TOAST_FIRED title=SMS from IBI
+[1787863826] ACTIVE_CALL_PANEL name=0543137306
+[1787863826] ACTIVE_CALL_PANEL name=0543137306
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] ACTIVE_CALL_PANEL name=Ido Cohen Vplans
+[1787863826] ACTIVE_CALL_PANEL name=Ido Cohen Vplans
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] ACTIVE_CALL_PANEL name=
+[1787863826] ACTIVE_CALL_PANEL name=
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] ACTIVE_CALL_PANEL name=039059700
+[1787863826] ACTIVE_CALL_PANEL name=039059700
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] ACTIVE_CALL_PANEL name=Yoran Yossipov ( Sela Data Specialist)
+[1787863826] ACTIVE_CALL_PANEL name=Yoran Yossipov ( Sela Data Specialist)
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] ACTIVE_CALL_PANEL name=
+[1787863826] ACTIVE_CALL_PANEL name=
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] ACTIVE_CALL_PANEL name=
+[1787863826] ACTIVE_CALL_PANEL name=
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] ACTIVE_CALL_PANEL name=
+[1787863826] ACTIVE_CALL_PANEL name=
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] ACTIVE_CALL_PANEL name=Ido Cohen Vplans
+[1787863826] ACTIVE_CALL_PANEL name=Ido Cohen Vplans
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] ACTIVE_CALL_PANEL name=
+[1787863826] ACTIVE_CALL_PANEL name=
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] ACTIVE_CALL_PANEL name=
+[1787863826] ACTIVE_CALL_PANEL name=
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] ACTIVE_CALL_PANEL name=
+[1787863826] ACTIVE_CALL_PANEL name=
+[1787863826] CALL_PANEL_DISMISS
+[1787863826] CALL_PANEL_DISMISS
+[1787870528] LINK browse results:
